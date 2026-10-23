@@ -1,0 +1,1367 @@
+[
+  {
+    "codigo": "120",
+    "descricao": "Motor Maintainer",
+    "orgid": "US"
+  },
+  {
+    "codigo": "210",
+    "descricao": "Electrician",
+    "orgid": "US"
+  },
+  {
+    "codigo": "400",
+    "descricao": "Building Maintenance polyvalent",
+    "orgid": "US"
+  },
+  {
+    "codigo": "480",
+    "descricao": "Cleaner",
+    "orgid": "US"
+  },
+  {
+    "codigo": "610",
+    "descricao": "Dimension Tooling Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "710",
+    "descricao": "Boiler House Operator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "840",
+    "descricao": "Operator - Maintainer",
+    "orgid": "US"
+  },
+  {
+    "codigo": "150",
+    "descricao": "Scale Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "240",
+    "descricao": "Electrician High Voltage",
+    "orgid": "US"
+  },
+  {
+    "codigo": "430",
+    "descricao": "Painter",
+    "orgid": "US"
+  },
+  {
+    "codigo": "510",
+    "descricao": "Welder",
+    "orgid": "US"
+  },
+  {
+    "codigo": "640",
+    "descricao": "Mold Expert",
+    "orgid": "US"
+  },
+  {
+    "codigo": "740",
+    "descricao": "Instrumentation Electrician",
+    "orgid": "US"
+  },
+  {
+    "codigo": "100",
+    "descricao": "Mechanical polyvalent",
+    "orgid": "US"
+  },
+  {
+    "codigo": "140",
+    "descricao": "Lubricator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "160",
+    "descricao": "Belt Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "200",
+    "descricao": "Electrical polyvalent",
+    "orgid": "US"
+  },
+  {
+    "codigo": "230",
+    "descricao": "Electronic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "250",
+    "descricao": "Computers / Networks",
+    "orgid": "US"
+  },
+  {
+    "codigo": "300",
+    "descricao": "320 oil",
+    "orgid": "US"
+  },
+  {
+    "codigo": "420",
+    "descricao": "Carpenter",
+    "orgid": "US"
+  },
+  {
+    "codigo": "440",
+    "descricao": "Plumber",
+    "orgid": "US"
+  },
+  {
+    "codigo": "470",
+    "descricao": "Utilities",
+    "orgid": "US"
+  },
+  {
+    "codigo": "500",
+    "descricao": "Metal worker polyvalent",
+    "orgid": "US"
+  },
+  {
+    "codigo": "520",
+    "descricao": "Fabricator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "600",
+    "descricao": "Dimension tooling polyvalent",
+    "orgid": "US"
+  },
+  {
+    "codigo": "630",
+    "descricao": "Mold Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "650",
+    "descricao": "Mold Changer",
+    "orgid": "US"
+  },
+  {
+    "codigo": "700",
+    "descricao": "Fluid Distribution polyvalent",
+    "orgid": "US"
+  },
+  {
+    "codigo": "730",
+    "descricao": "Waste Water Operator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "800",
+    "descricao": "Metrology",
+    "orgid": "US"
+  },
+  {
+    "codigo": "820",
+    "descricao": "Work Planner",
+    "orgid": "US"
+  },
+  {
+    "codigo": "860",
+    "descricao": "Predictive Maintenance Technician",
+    "orgid": "US"
+  },
+  {
+    "codigo": "110",
+    "descricao": "Mechanic - Material Handling",
+    "orgid": "US"
+  },
+  {
+    "codigo": "130",
+    "descricao": "Forklift Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "170",
+    "descricao": "Mechanic Specialist L3",
+    "orgid": "US"
+  },
+  {
+    "codigo": "180",
+    "descricao": "Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "220",
+    "descricao": "Automation Technician",
+    "orgid": "US"
+  },
+  {
+    "codigo": "260",
+    "descricao": "Telephones",
+    "orgid": "US"
+  },
+  {
+    "codigo": "270",
+    "descricao": "Automation Specialist L3",
+    "orgid": "US"
+  },
+  {
+    "codigo": "410",
+    "descricao": "Mason",
+    "orgid": "US"
+  },
+  {
+    "codigo": "450",
+    "descricao": "HVAC",
+    "orgid": "US"
+  },
+  {
+    "codigo": "460",
+    "descricao": "Grounds",
+    "orgid": "US"
+  },
+  {
+    "codigo": "490",
+    "descricao": "Battery Room Operator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "530",
+    "descricao": "Machinist",
+    "orgid": "US"
+  },
+  {
+    "codigo": "540",
+    "descricao": "Pipe Fitter",
+    "orgid": "US"
+  },
+  {
+    "codigo": "620",
+    "descricao": "Dimension Change",
+    "orgid": "US"
+  },
+  {
+    "codigo": "660",
+    "descricao": "Set-up Mechanic",
+    "orgid": "US"
+  },
+  {
+    "codigo": "670",
+    "descricao": "Membrane Operator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "720",
+    "descricao": "Water Treatment Specialist",
+    "orgid": "US"
+  },
+  {
+    "codigo": "810",
+    "descricao": "Regulatory Equipment Specialist",
+    "orgid": "US"
+  },
+  {
+    "codigo": "830",
+    "descricao": "Work Scheduler",
+    "orgid": "US"
+  },
+  {
+    "codigo": "850",
+    "descricao": "Installation Inspector",
+    "orgid": "US"
+  },
+  {
+    "codigo": "610",
+    "descricao": "Dimension Tooling Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "710",
+    "descricao": "Boiler House Operator",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "150",
+    "descricao": "Scale Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "740",
+    "descricao": "Instrumentation Electrician",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "200",
+    "descricao": "Electrical polyvalent",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "510",
+    "descricao": "Welder",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "500",
+    "descricao": "Metal worker polyvalent",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "440",
+    "descricao": "Plumber",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "110",
+    "descricao": "Mechanic - Material Handling",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "800",
+    "descricao": "Metrology",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "700",
+    "descricao": "Fluid Distribution polyvalent",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "260",
+    "descricao": "Telephones",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "220",
+    "descricao": "Automation Technician",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "450",
+    "descricao": "HVAC",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "620",
+    "descricao": "Dimension Change",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "140",
+    "descricao": "Lubricator",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "130",
+    "descricao": "Forklift Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "170",
+    "descricao": "Mechanic Specialist L3",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "200",
+    "descricao": "Electrical polyvalent",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "220",
+    "descricao": "Automation Technician",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "300",
+    "descricao": "Mechanical - Electrical polyvalent (ST)",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "270",
+    "descricao": "Automation Specialist L3",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "420",
+    "descricao": "Carpenter",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "460",
+    "descricao": "Grounds",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "480",
+    "descricao": "Cleaner",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "510",
+    "descricao": "Welder",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "610",
+    "descricao": "Dimension Tooling Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "620",
+    "descricao": "Dimension Change",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "640",
+    "descricao": "Mold Expert",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "720",
+    "descricao": "Water Treatment Specialist",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "710",
+    "descricao": "Boiler House Operator",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "810",
+    "descricao": "Regulatory Equipment Specialist",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "840",
+    "descricao": "Operator - Maintainer",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "860",
+    "descricao": "Predictive Maintenance Technician",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "400",
+    "descricao": "Building Maintenance polyvalent",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "210",
+    "descricao": "Electrician",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "240",
+    "descricao": "Electrician High Voltage",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "140",
+    "descricao": "Lubricator",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "430",
+    "descricao": "Painter",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "230",
+    "descricao": "Electronic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "420",
+    "descricao": "Carpenter",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "520",
+    "descricao": "Fabricator",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "250",
+    "descricao": "Computers / Networks",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "630",
+    "descricao": "Mold Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "820",
+    "descricao": "Work Planner",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "650",
+    "descricao": "Mold Changer",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "730",
+    "descricao": "Waste Water Operator",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "130",
+    "descricao": "Forklift Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "170",
+    "descricao": "Mechanic Specialist L3",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "270",
+    "descricao": "Automation Specialist L3",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "490",
+    "descricao": "Battery Room Operator",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "460",
+    "descricao": "Grounds",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "530",
+    "descricao": "Machinist",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "540",
+    "descricao": "Pipe Fitter",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "850",
+    "descricao": "Installation Inspector",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "830",
+    "descricao": "Work Scheduler",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "660",
+    "descricao": "Set-up Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "120",
+    "descricao": "Motor Maintainer",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "210",
+    "descricao": "Electrician",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "400",
+    "descricao": "Building Maintenance polyvalent",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "480",
+    "descricao": "Cleaner",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "610",
+    "descricao": "Dimension Tooling Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "710",
+    "descricao": "Boiler House Operator",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "840",
+    "descricao": "Operator - Maintainer",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "150",
+    "descricao": "Scale Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "240",
+    "descricao": "Electrician High Voltage",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "430",
+    "descricao": "Painter",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "510",
+    "descricao": "Welder",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "640",
+    "descricao": "Mold Expert",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "740",
+    "descricao": "Instrumentation Electrician",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "100",
+    "descricao": "Mechanical polyvalent",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "140",
+    "descricao": "Lubricator",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "160",
+    "descricao": "Belt Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "200",
+    "descricao": "Electrical polyvalent",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "230",
+    "descricao": "Electronic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "250",
+    "descricao": "Computers / Networks",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "300",
+    "descricao": "Mechanical - Electrical polyvalent (ST)",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "420",
+    "descricao": "Carpenter",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "440",
+    "descricao": "Plumber",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "470",
+    "descricao": "Utilities",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "500",
+    "descricao": "Metal worker polyvalent",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "520",
+    "descricao": "Fabricator",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "600",
+    "descricao": "Dimension tooling polyvalent",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "630",
+    "descricao": "Mold Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "650",
+    "descricao": "Mold Changer",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "700",
+    "descricao": "Fluid Distribution polyvalent",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "730",
+    "descricao": "Waste Water Operator",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "800",
+    "descricao": "Metrology",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "820",
+    "descricao": "Work Planner",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "860",
+    "descricao": "Predictive Maintenance Technician",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "110",
+    "descricao": "Mechanic - Material Handling",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "130",
+    "descricao": "Forklift Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "170",
+    "descricao": "Mechanic Specialist L3",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "180",
+    "descricao": "Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "220",
+    "descricao": "Automation Technician",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "260",
+    "descricao": "Telephones",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "270",
+    "descricao": "Automation Specialist L3",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "410",
+    "descricao": "Mason",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "450",
+    "descricao": "HVAC",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "460",
+    "descricao": "Grounds",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "490",
+    "descricao": "Battery Room Operator",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "530",
+    "descricao": "Machinist",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "540",
+    "descricao": "Pipe Fitter",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "620",
+    "descricao": "Dimension Change",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "660",
+    "descricao": "Set-up Mechanic",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "670",
+    "descricao": "Membrane Operator",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "720",
+    "descricao": "Water Treatment Specialist",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "810",
+    "descricao": "Regulatory Equipment Specialist",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "830",
+    "descricao": "Work Scheduler",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "850",
+    "descricao": "Installation Inspector",
+    "orgid": "IN"
+  },
+  {
+    "codigo": "100",
+    "descricao": "Mechanical polyvalent",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "110",
+    "descricao": "Mechanic - Material Handling",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "210",
+    "descricao": "Electrician",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "240",
+    "descricao": "Electrician High Voltage",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "400",
+    "descricao": "Building Maintenance polyvalent",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "430",
+    "descricao": "Painter",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "470",
+    "descricao": "Utilities",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "540",
+    "descricao": "Pipe Fitter",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "600",
+    "descricao": "Dimension tooling polyvalent",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "670",
+    "descricao": "Membrane Operator",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "700",
+    "descricao": "Fluid Distribution polyvalent",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "830",
+    "descricao": "Work Scheduler",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "820",
+    "descricao": "Work Planner",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "160",
+    "descricao": "Belt Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "180",
+    "descricao": "Mechanic",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "720",
+    "descricao": "Water Treatment Specialist",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "120",
+    "descricao": "Motor Maintainer",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "160",
+    "descricao": "Belt Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "150",
+    "descricao": "Scale Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "230",
+    "descricao": "Electronic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "260",
+    "descricao": "Telephones",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "250",
+    "descricao": "Computers / Networks",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "410",
+    "descricao": "Mason",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "440",
+    "descricao": "Plumber",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "450",
+    "descricao": "HVAC",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "500",
+    "descricao": "Metal worker polyvalent",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "530",
+    "descricao": "Machinist",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "520",
+    "descricao": "Fabricator",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "650",
+    "descricao": "Mold Changer",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "630",
+    "descricao": "Mold Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "660",
+    "descricao": "Set-up Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "730",
+    "descricao": "Waste Water Operator",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "740",
+    "descricao": "Instrumentation Electrician",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "800",
+    "descricao": "Metrology",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "850",
+    "descricao": "Installation Inspector",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "120",
+    "descricao": "Motor Maintainer",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "480",
+    "descricao": "Cleaner",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "840",
+    "descricao": "Operator - Maintainer",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "100",
+    "descricao": "Mechanical polyvalent",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "640",
+    "descricao": "Mold Expert",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "300",
+    "descricao": "Mechanical - Electrical polyvalent (ST)",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "470",
+    "descricao": "Utilities",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "600",
+    "descricao": "Dimension tooling polyvalent",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "860",
+    "descricao": "Predictive Maintenance Technician",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "410",
+    "descricao": "Mason",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "810",
+    "descricao": "Regulatory Equipment Specialist",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "670",
+    "descricao": "Membrane Operator",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "430",
+    "descricao": "Pintor",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "730",
+    "descricao": "Operador de tratamento de res\u00edduos",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "220",
+    "descricao": "Eletricista de Automatismo",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "800",
+    "descricao": "Metrologia",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "540",
+    "descricao": "Encanador",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "600",
+    "descricao": "Polivalente de troca de dimens\u00e3o",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "250",
+    "descricao": "Inform\u00e1tica / redes",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "610",
+    "descricao": "Mec\u00e2nico de material dimensional",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "820",
+    "descricao": "Preparador",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "270",
+    "descricao": "T\u00e9cnico de Automatismo",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "160",
+    "descricao": "Mec\u00e2nico de Tapetes",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "630",
+    "descricao": "Mec\u00e2nico de moldes",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "840",
+    "descricao": "Operador-mantenedor",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "400",
+    "descricao": "Mantenedor de Pr\u00e9dios polivalente",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "850",
+    "descricao": "Inspetor de instala\u00e7\u00f5es",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "650",
+    "descricao": "Trocador de moldes",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "520",
+    "descricao": "Serralheiro",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "670",
+    "descricao": "Preparador de membranas",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "511",
+    "descricao": "Staineless Welder",
+    "orgid": "US"
+  },
+  {
+    "codigo": "180",
+    "descricao": "Mechanic",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "481",
+    "descricao": "Watergun Operator",
+    "orgid": "US"
+  },
+  {
+    "codigo": "750",
+    "descricao": "Chiller System Specialist",
+    "orgid": "US"
+  },
+  {
+    "codigo": "700",
+    "descricao": "Polivalente de Fl\u00faidos",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "530",
+    "descricao": "Mec\u00e2nico de usinagem",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "740",
+    "descricao": "Instrumentista",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "130",
+    "descricao": "Mec\u00e2nico de empilhadeira",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "240",
+    "descricao": "Eletricista de alta-tens\u00e3o",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "810",
+    "descricao": "Especialista de equipamentos regulat\u00f3rios",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "620",
+    "descricao": "Troca de dimens\u00e3o",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "480",
+    "descricao": "Limpeza",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "830",
+    "descricao": "Planejador",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "500",
+    "descricao": "Mec\u00e2nico geral",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "180",
+    "descricao": "Mec\u00e2nico",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "410",
+    "descricao": "Pedreiro",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "660",
+    "descricao": "Regulador",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "490",
+    "descricao": "Battery Room Operator",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "100",
+    "descricao": "Mec\u00e2nico polivalente",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "110",
+    "descricao": "Mec\u00e2nico de pontes rolantes e talhas",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "710",
+    "descricao": "Operador de caldeira",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "720",
+    "descricao": "Especialista de tratamento de \u00e1gua",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "440",
+    "descricao": "Bombeiro Hidr\u00e1ulico",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "120",
+    "descricao": "Motorista",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "230",
+    "descricao": "T\u00e9cnico de Eletr\u00f4nica",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "450",
+    "descricao": "Mec\u00e2nico de climatiza\u00e7\u00e3o",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "460",
+    "descricao": "Jardinagem",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "140",
+    "descricao": "Lubrificador",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "470",
+    "descricao": "Utilidades / Pr\u00e9dios",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "260",
+    "descricao": "Telefonia",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "150",
+    "descricao": "Mec\u00e2nico de Balan\u00e7as",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "490",
+    "descricao": "Operador de sala de baterias",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "300",
+    "descricao": "Eletromec\u00e2nico",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "640",
+    "descricao": "Expert de Moldes",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "170",
+    "descricao": "T\u00e9cnico de Mec\u00e2nica",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "510",
+    "descricao": "Soldador",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "860",
+    "descricao": "Contratado / M\u00e3o de obra externa",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "200",
+    "descricao": "Eletricista polivalente",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "420",
+    "descricao": "Carpinteiro",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "210",
+    "descricao": "Eletricista",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "900",
+    "descricao": "Preven\u00e7\u00e3o de Inc\u00eandio / Seguran\u00e7a",
+    "orgid": "BR"
+  },
+  {
+    "codigo": "900",
+    "descricao": "safety /fire prevention",
+    "orgid": "US"
+  },
+  {
+    "codigo": "900",
+    "descricao": "safety /fire prevention",
+    "orgid": "CA"
+  },
+  {
+    "codigo": "900",
+    "descricao": "safety /fire prevention",
+    "orgid": "MX"
+  },
+  {
+    "codigo": "910",
+    "descricao": "Rigger",
+    "orgid": "US"
+  }
+]

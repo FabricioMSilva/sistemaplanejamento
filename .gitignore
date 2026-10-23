@@ -1,0 +1,48 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Uploads and local DB
+backend/uploads/*
+!backend/uploads/.gitkeep
+database/data/*.db
+database/data/*.db-journal
+database/data/*
+!database/data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Local credentials, browser sessions and generated exports
+.env
+.env.*
+!.env.example
+**/FirefoxProfile/
+**/cookies*.json
+**/credentials*.json
+**/secrets*.json
+*.pem
+*.key
+*.pfx
+*.p12
+Planejamento NFE*.xlsx
+cronograma-*.pdf
+carteira-*.xlsx
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+*.tsbuildinfo
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
