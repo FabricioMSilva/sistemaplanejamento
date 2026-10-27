@@ -63,12 +63,62 @@ class PcmPlanningTests(unittest.TestCase):
     def create(self):
         return pcm.create_plan(["RES-PCMTEST"])
 
+    def test_legacy_planner_registration_is_displayed_with_name(self):
+        people = [{"matricula": "B111132", "nome": "Nome do Planejador"}]
+        self.assertEqual(
+            pcm._planner_display_name("B111132", people),
+            "B111132 - Nome do Planejador",
+        )
+        self.assertEqual(pcm._planner_display_name("OUTRA-MATRICULA", people), "OUTRA-MATRICULA")
+
     def test_create_is_idempotent_and_corrective_has_no_date_filter(self):
         doc = self.create()
         self.assertEqual([o["wonum"] for o in doc["ordens"]], ["PM1", "E1"])
         self.assertEqual(self.create()["id"], doc["id"])
         self.assertEqual(len(pcm.list_plans()), 1)
         self.assertTrue(pcm.get_pdf(doc["id"], 1).startswith(b"%PDF"))
+
+    def test_delete_plan_removes_plan_and_all_revisions(self):
+        doc = self.create()
+        saved = pcm.save_plan(doc["id"], change(doc))
+        self.assertEqual(len(pcm.revisions(doc["id"])), 2)
+        self.assertEqual(pcm.delete_plan(doc["id"]), {"id": doc["id"], "deleted": True})
+        self.assertEqual(pcm.list_plans(), [])
+        with self.assertRaises(LookupError):
+            pcm.get_plan(doc["id"])
+        with database.get_connection() as conn:
+            remaining = conn.execute("SELECT COUNT(*) FROM pcm_revisoes WHERE plano_id=?", (saved["id"],)).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_delete_missing_plan_raises_not_found(self):
+        with self.assertRaisesRegex(LookupError, "Planejamento nao encontrado"):
+            pcm.delete_plan("missing")
+
+    def test_team_update_changes_only_plan_snapshot_and_creates_revision(self):
+        original_team = team()
+        original_team["executantes"] = original_team["executantes"][:1]
+        with patch.object(pcm, "obter_equipe", return_value=original_team):
+            doc = self.create()
+            self.assertEqual(len(doc["pessoas"]), 1)
+            updated = pcm.update_plan_team(doc["id"], pcm.PlanTeamChange(revisao=doc["revisao"], equipe=team()))
+            self.assertEqual(updated["revisao"], doc["revisao"] + 1)
+            self.assertEqual(len(updated["pessoas"]), 2)
+            self.assertEqual(len(updated["equipe"]["executantes"]), 2)
+            self.assertEqual(len(pcm.revisions(doc["id"])), 2)
+            self.assertEqual(len(pcm.obter_equipe(["RES-PCMTEST"])["executantes"]), 1)
+
+    def test_team_update_rejects_removing_an_allocated_executor(self):
+        doc = self.prepared_doc()
+        first_person = doc["pessoas"][0]["id"]
+        block = {"id": "block-1", "ot": "RES:E1", "dia": "2026-10-26", "inicio": 0,
+                 "horas": 1, "executantes": [first_person]}
+        doc["blocos"] = [block]
+        with database.get_connection() as conn:
+            conn.execute("UPDATE pcm_planos SET dados_json=? WHERE id=?", (json.dumps(doc), doc["id"]))
+        changed_team = team()
+        changed_team["executantes"] = changed_team["executantes"][1:]
+        with self.assertRaisesRegex(ValueError, "não pode remover executantes usados"):
+            pcm.update_plan_team(doc["id"], pcm.PlanTeamChange(revisao=doc["revisao"], equipe=changed_team))
 
     def test_missing_requirements_are_not_invented(self):
         doc = self.create()

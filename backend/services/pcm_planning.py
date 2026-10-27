@@ -62,6 +62,11 @@ class PlanChange(Input):
     posicionamentos: list[Placement] = Field(default_factory=list, max_length=20000)
 
 
+class PlanTeamChange(Input):
+    revisao: int = Field(ge=1)
+    equipe: PlanejamentoEquipe
+
+
 class NewPlan(Input):
     setores: list[str] = Field(min_length=1, max_length=28)
 
@@ -160,6 +165,17 @@ def list_plans() -> list[dict]:
             for doc in (json.loads(row["dados_json"]) for row in rows)]
 
 
+def delete_plan(plan_id: str) -> dict:
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT id FROM pcm_planos WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise LookupError("Planejamento nao encontrado.")
+        conn.execute("DELETE FROM pcm_revisoes WHERE plano_id=?", (plan_id,))
+        conn.execute("DELETE FROM pcm_planos WHERE id=?", (plan_id,))
+    return {"id": plan_id, "deleted": True}
+
+
 def revisions(plan_id: str) -> list[dict]:
     get_plan(plan_id)
     with get_connection() as conn:
@@ -167,6 +183,63 @@ def revisions(plan_id: str) -> list[dict]:
             "SELECT revisao,salvo_em,motivo FROM pcm_revisoes WHERE plano_id=? ORDER BY revisao DESC",
             (plan_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+def update_plan_team(plan_id: str, change: PlanTeamChange) -> dict:
+    current = get_plan(plan_id)
+    if current["revisao"] != change.revisao:
+        raise ConflictError("O plano foi alterado. Recarregue antes de salvar a equipe.")
+    team = change.equipe
+    if (sorted(set(sector.upper() for sector in team.setores)) != current["setores"]
+            or str(team.inicio) != current["inicio"] or str(team.fim) != current["fim"]):
+        raise ValueError("A equipe deve manter os setores e o período deste planejamento.")
+    if not team.executantes or not team.planejador.strip():
+        raise ValueError("Selecione ao menos um executante e informe o planejador.")
+    if any(member.capacidade != "dias_8h" for member in team.executantes):
+        raise ValueError("Revise os dias disponíveis de 8 h dos executantes antes de salvar.")
+
+    labor = listar_mao_de_obra(current["setores"])
+    calcular_equipe(team, labor)
+    labor_people = {(person["orgid"], person["matricula"]): person for person in labor["profissionais"]}
+    people = []
+    for member in team.executantes:
+        person = labor_people[(member.orgid, member.matricula)]
+        craft = next(craft for craft in person["especialidades"] if craft["codigo"] == member.funcao)
+        people.append({"id": f"{member.orgid}:{member.matricula}", "nome": person["nome"],
+                       "orgid": member.orgid, "matricula": member.matricula, "funcao": member.funcao,
+                       "funcao_descricao": craft["descricao"],
+                       "dias": sorted(str(day) for day in member.dias_disponiveis)})
+
+    doc = copy.deepcopy(current)
+    doc["equipe"] = team.model_dump(mode="json")
+    doc["pessoas"] = people
+    person_ids = {person["id"] for person in people}
+    if (any(member not in person_ids for block in doc["blocos"] for member in block["executantes"])
+            or any(item["executante"] not in person_ids for item in doc["indisponibilidades"])
+            or any(item["executante"] not in person_ids for item in doc.get("posicionamentos", []))):
+        raise ValueError("A equipe não pode remover executantes usados em blocos, indisponibilidades ou posicionamentos.")
+    validate_plan(doc, current["status"] == "confirmado")
+    doc.update(revisao=current["revisao"] + 1, atualizado_em=datetime.now(timezone.utc).isoformat(),
+               motivo="Equipe do planejamento atualizada")
+    encoded = json.dumps(doc, ensure_ascii=False)
+    pdf = schedule_pdf(doc)
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT revisao,status FROM pcm_planos WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise LookupError("Planejamento nao encontrado.")
+        if row["revisao"] != change.revisao:
+            raise ConflictError("O plano foi alterado. Recarregue antes de salvar a equipe.")
+        if doc["status"] == "confirmado":
+            validate_confirmed_capacity(conn, plan_id, doc)
+        updated = conn.execute(
+            "UPDATE pcm_planos SET revisao=?,atualizado_em=?,dados_json=? WHERE id=? AND revisao=?",
+            (doc["revisao"], doc["atualizado_em"], encoded, plan_id, change.revisao))
+        if updated.rowcount != 1:
+            raise ConflictError("O plano foi alterado. Recarregue antes de salvar a equipe.")
+        conn.execute("INSERT INTO pcm_revisoes VALUES (?,?,?,?,?,?)",
+                     (plan_id, doc["revisao"], doc["atualizado_em"], doc["motivo"], encoded, pdf))
+    return doc
 
 
 def create_plan(sectors: list[str]) -> dict:
@@ -376,16 +449,7 @@ def save_plan(plan_id: str, change: PlanChange) -> dict:
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         if doc["status"] == "confirmado":
-            others = conn.execute("SELECT dados_json FROM pcm_planos WHERE status='confirmado' AND id<>?", (plan_id,)).fetchall()
-            for row in others:
-                other = json.loads(row["dados_json"])
-                if (other["inicio"] <= doc["fim"] and other["fim"] >= doc["inicio"]
-                        and {b["ot"] for b in doc["blocos"]} & {b["ot"] for b in other["blocos"]}):
-                    raise ValueError("Uma OT ja esta alocada em outro planejamento confirmado no mesmo horizonte.")
-            totals = weekly_totals([doc, *(json.loads(row["dados_json"]) for row in others)])
-            relevant = {(p, week_start(b["dia"])) for b in doc["blocos"] for p in b["executantes"]}
-            if any(totals[key]["horas"] > totals[key]["capacidade"] + 1e-6 for key in relevant):
-                raise ValueError("Executante ja comprometido: capacidade semanal excedida entre planejamentos confirmados.")
+            validate_confirmed_capacity(conn, plan_id, doc)
         updated = conn.execute(
             "UPDATE pcm_planos SET revisao=?,status=?,atualizado_em=?,dados_json=? WHERE id=? AND revisao=?",
             (doc["revisao"], doc["status"], doc["atualizado_em"], encoded, plan_id, change.revisao))
@@ -394,6 +458,19 @@ def save_plan(plan_id: str, change: PlanChange) -> dict:
         conn.execute("INSERT INTO pcm_revisoes VALUES (?,?,?,?,?,?)",
                      (plan_id, doc["revisao"], doc["atualizado_em"], doc["motivo"], encoded, pdf))
     return doc
+
+
+def validate_confirmed_capacity(conn, plan_id: str, doc: dict) -> None:
+    rows = conn.execute("SELECT dados_json FROM pcm_planos WHERE status='confirmado' AND id<>?", (plan_id,)).fetchall()
+    others = [json.loads(row["dados_json"]) for row in rows]
+    for other in others:
+        if (other["inicio"] <= doc["fim"] and other["fim"] >= doc["inicio"]
+                and {block["ot"] for block in doc["blocos"]} & {block["ot"] for block in other["blocos"]}):
+            raise ValueError("Uma OT ja esta alocada em outro planejamento confirmado no mesmo horizonte.")
+    totals = weekly_totals([doc, *others])
+    relevant = {(person, week_start(block["dia"])) for block in doc["blocos"] for person in block["executantes"]}
+    if any(totals[key]["horas"] > totals[key]["capacidade"] + 1e-6 for key in relevant):
+        raise ValueError("Executante ja comprometido: capacidade semanal excedida entre planejamentos confirmados.")
 
 
 def suggest(current: dict, request: Suggestion) -> dict:
@@ -496,14 +573,45 @@ def spreadsheet(payload: ExportOrders) -> bytes:
     return output.getvalue()
 
 
+def _planner_display_name(value: str, people: list[dict]) -> str:
+    planner = value.strip()
+    normalized_planner = planner.casefold()
+    for person in people:
+        registration = str(person.get("matricula") or "").strip()
+        name = str(person.get("nome") or "").strip()
+        if not registration or not name:
+            continue
+        if normalized_planner in {registration.casefold(), name.casefold()} \
+                or normalized_planner.startswith(f"{registration.casefold()} - "):
+            return f"{registration} - {name}"
+    return planner
+
+
 def schedule_pdf(doc: dict) -> bytes:
     from services.pcm_pdf import render_schedule
-    return render_schedule(doc)
+    report = copy.deepcopy(doc)
+    planner = str(report.get("planejador") or "").strip()
+    if planner:
+        people = listar_mao_de_obra(None, filtrar_nf=False)["profissionais"]
+        report["planejador"] = _planner_display_name(planner, people)
+    return render_schedule(report)
 
 
 def get_pdf(plan_id: str, revision: int) -> bytes:
     with get_connection() as conn:
-        row = conn.execute("SELECT pdf FROM pcm_revisoes WHERE plano_id=? AND revisao=?", (plan_id, revision)).fetchone()
+        row = conn.execute(
+            "SELECT dados_json, pdf FROM pcm_revisoes WHERE plano_id=? AND revisao=?",
+            (plan_id, revision),
+        ).fetchone()
     if row is None:
         raise LookupError("Cronograma nao encontrado.")
+    doc = json.loads(row["dados_json"])
+    planner = str(doc.get("planejador") or "").strip()
+    if planner:
+        people = listar_mao_de_obra(None, filtrar_nf=False)["profissionais"]
+        resolved = _planner_display_name(planner, people)
+        if resolved != planner:
+            doc["planejador"] = resolved
+            from services.pcm_pdf import render_schedule
+            return render_schedule(doc)
     return bytes(row["pdf"])

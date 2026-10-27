@@ -18,8 +18,8 @@ function load(relative) {
   }, m, m.exports);
   return m.exports;
 }
-const { dropActivity, planningMetrics, dayLoad, distributeBatch, conflictingBlocks, allocatedDuration, weeklyBalance, pendingActivity, scheduleSelectedDays, proposedDays, activityCategory, resequenceWeek } = load("utils/workPlanning");
-const { matchesOrderSpecialty, plannedLabor } = load("utils/plannedLabor");
+const { dropActivity, activityDateConstraintError, isTargetDay, planningMetrics, dayLoad, provisionalDayLoad, displayedDayLoad, specialtyWorkload, distributeBatch, prepareDraggedOrder, activityPlanningComplete, readyForAutoConfirmation, conflictingBlocks, allocatedDuration, weeklyBalance, pendingActivity, scheduleSelectedDays, proposedDays, activityCategory, resequenceWeek } = load("utils/workPlanning");
+const { matchesOrderSpecialty, missingPlanningData, plannedLabor, plannedBmaOrders } = load("utils/plannedLabor");
 function fixture() {
   return {
     inicio: "2026-10-26", fim: "2026-10-27",
@@ -45,6 +45,45 @@ test("drop creates simultaneous daily blocks and shared PM/corrective capacity",
   assert.deepEqual(planningMetrics(plan), { capacity: 32, pm: 20, corrective: 12, remaining: 0 });
   assert.equal(dayLoad(plan, "A", "2026-10-27"), 8);
   assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-27", "A"), /totalmente alocada/);
+});
+test("date constraints reject exact drops with clear Portuguese messages", () => {
+  const plan = fixture(), order = plan.ordens[0];
+  plan.fim = "2026-10-28";
+  order.dados = { sneconstraint: "2026-10-27", fnlconstraint: "2026-10-27" };
+  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /PM1: não iniciar antes de 27\/10\/2026/);
+  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-28", "A"), /PM1: não terminar depois de 27\/10\/2026/);
+  assert.match(activityDateConstraintError(order, "2026-10-26"), /não iniciar antes/);
+  const invalidDrop = distributeBatch(plan, ["RES:PM1"], "A", "2026-10-26", true);
+  assert.equal(invalidDrop.blocos.length, 0);
+  assert.match(invalidDrop.mensagens[0], /não iniciar antes/);
+});
+test("drag preparation uses BMA estimates and safe defaults without inventing duration", () => {
+  const plan = fixture();
+  plan.ordens[0].dados.estdur = 4;
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: null, pessoas: null, orgid: "", funcao: "", todas_especialidades: false };
+  const prepared = prepareDraggedOrder(plan, "RES:PM1");
+  assert.equal(prepared.requisitos["RES:PM1"].duracao, 4);
+  assert.equal(prepared.requisitos["RES:PM1"].pessoas, 1);
+  assert.equal(prepared.requisitos["RES:PM1"].todas_especialidades, true);
+  const scheduled = distributeBatch(prepared, ["RES:PM1"], "A", plan.inicio, true);
+  assert.equal(scheduled.blocos[0].horas, 4);
+  assert.deepEqual(scheduled.blocos[0].executantes, ["A"]);
+
+  const noEstimate = { ...plan, ordens: [{ siteid: "RES", wonum: "PM1", dados: { worktype: "S" } }] };
+  assert.equal(prepareDraggedOrder(noEstimate, "RES:PM1").requisitos["RES:PM1"].duracao, null);
+});
+test("complete dragged orders are ready for automatic confirmation only without pending work or conflicts", () => {
+  const plan = fixture();
+  plan.ordens[0].dados.estdur = 4;
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: null, pessoas: null, orgid: "", funcao: "", todas_especialidades: false };
+  const prepared = prepareDraggedOrder(plan, "RES:PM1");
+  const result = distributeBatch(prepared, ["RES:PM1"], "A", plan.inicio, true);
+  const ready = { ...prepared, blocos: result.blocos,
+    requisitos: { ...prepared.requisitos, "RES:PM1": { ...prepared.requisitos["RES:PM1"], selecionada: true } } };
+  assert.equal(activityPlanningComplete(ready, "RES:PM1"), true);
+  assert.equal(readyForAutoConfirmation(ready), true);
+  assert.equal(readyForAutoConfirmation({ ...ready, posicionamentos: [{ ot: "RES:E1", executante: "A", dia: plan.inicio }] }), false);
+  assert.equal(readyForAutoConfirmation({ ...ready, requisitos: { ...ready.requisitos, "RES:E1": { ...ready.requisitos["RES:E1"], selecionada: true } } }), false);
 });
 test("drop refuses absence, missing preparation and incompatible specialty", () => {
   const plan = fixture();
@@ -113,7 +152,7 @@ test("batch reports incompatible or unprepared OTs and respects absences and dat
   result = distributeBatch(plan, ["RES:PM1"], "A");
   assert.equal(result.blocos.length, 0);
   assert.match(result.mensagens[0], /pendentes/);
-  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /restrições/);
+  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /não iniciar antes/);
 });
 
 test("daily 12 h is valid within a 16 h week; only weekly excess is red", () => {
@@ -157,6 +196,64 @@ test("specialty filter uses collected BMA labor, supports multiple specialties a
   req.todas_especialidades = true;
   assert.equal(matchesOrderSpecialty(order, req, "qualquer"), true);
 });
+test("missing BMA duration, craft or quantity is identified for red schedule borders", () => {
+  const order = fixture().ordens[0];
+  order.dados.estdur = 4;
+  assert.deepEqual(missingPlanningData(order), ["especialidade", "quantidade de mão de obra"]);
+  order.dados.wplabor = [{ craft: { value: "180" }, quantity: { _value: 1 }, laborhrs: 4 }];
+  assert.deepEqual(missingPlanningData(order), []);
+  delete order.dados.estdur;
+  order.dados.estlabhrs = 0;
+  assert.deepEqual(missingPlanningData(order), ["duração estimada"]);
+});
+
+test("BMA preview groups planned order blocks with each date and assigned executants", () => {
+  const plan = {
+    ordens: [
+      { siteid: "RES", wonum: "OT-10", dados: { description: "Bomba" } },
+      { siteid: "RES", wonum: "OT-2", dados: { description: "Motor" } },
+      { siteid: "RES", wonum: "OT-99", dados: { description: "Não alocada" } },
+    ],
+    requisitos: { "RES:OT-10": { funcao: "180" } },
+    pessoas: [
+      { id: "BR:100", nome: "Ana Souza", matricula: "100" },
+      { id: "BR:200", nome: "Bruno Lima", matricula: "200" },
+    ],
+    blocos: [
+      { ot: "RES:OT-10", dia: "2026-10-28", horas: 2, executantes: ["BR:100"] },
+      { ot: "RES:OT-10", dia: "2026-10-29", horas: 1, executantes: ["BR:100", "BR:200"] },
+      { ot: "RES:OT-2", dia: "2026-10-27", horas: 3, executantes: ["BR:200"] },
+    ],
+  };
+  const rows = plannedBmaOrders(plan);
+  assert.deepEqual(rows.map((row) => row.order.wonum), ["OT-2", "OT-10"]);
+  assert.deepEqual(rows[1].allocations, [
+    { dia: "2026-10-28", horas: 2, executantes: ["Ana Souza - 100"] },
+    { dia: "2026-10-29", horas: 1, executantes: ["Ana Souza - 100", "Bruno Lima - 200"] },
+  ]);
+  assert.deepEqual(rows[1].planning, {
+    planned_start: "2026-10-28T00:01:00",
+    planned_finish: "2026-10-29T23:59:00",
+    specialty: "180",
+    assignments: [
+      { dia: "2026-10-28", laborcode: "100", horas: 2 },
+      { dia: "2026-10-29", laborcode: "100", horas: 1 },
+      { dia: "2026-10-29", laborcode: "200", horas: 1 },
+    ],
+  });
+});
+
+test("BMA preview infers specialty from a unique assigned labor registration", () => {
+  const plan = {
+    ordens: [{ siteid: "RES", wonum: "OT-1", dados: {} }],
+    requisitos: { "RES:OT-1": { funcao: "" } },
+    pessoas: [{ id: "BR:100", nome: "Ana Souza", matricula: "100", funcao: "180" }],
+    blocos: [{ ot: "RES:OT-1", dia: "2026-10-28", horas: 2, executantes: ["BR:100"] }],
+  };
+  const [row] = plannedBmaOrders(plan);
+  assert.equal(row.planning.specialty, "180");
+  assert.deepEqual(row.allocations[0].executantes, ["Ana Souza - 100"]);
+});
 
 test("pending portfolio hides complete orders, retains partials, and restores removed allocations", () => {
   const plan = fixture();
@@ -177,6 +274,36 @@ test("drop with missing preparation identifies the fields instead of pretending 
   const result = distributeBatch(plan, ["RES:PM1"], "A");
   assert.equal(result.blocos.length, 0);
   assert.match(result.mensagens[0], /quantidade de pessoas, especialidade/);
+});
+
+test("positioned estimated hours preview daily occupancy without reserving capacity", () => {
+  const plan = fixture();
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: 4, pessoas: null };
+  plan.posicionamentos = [{ ot: "RES:PM1", executante: "A", dia: plan.inicio }];
+  assert.equal(dayLoad(plan, "A", plan.inicio), 0);
+  assert.equal(provisionalDayLoad(plan, "A", plan.inicio), 4);
+  assert.equal(displayedDayLoad(plan, "A", plan.inicio), 4);
+  plan.blocos.push({ id: "partial", ot: "RES:PM1", dia: plan.inicio, inicio: 0, horas: 2, executantes: ["A"] });
+  assert.equal(provisionalDayLoad(plan, "A", plan.inicio), 2);
+  assert.equal(displayedDayLoad(plan, "A", plan.inicio), 4);
+  assert.equal(weeklyBalance(plan, "A", plan.inicio).remaining, 14);
+});
+
+test("PM workload compares specialty labor hours with team capacity and remaining balance", () => {
+  const plan = fixture();
+  plan.pessoas[0].funcao_descricao = "Mecânico";
+  plan.pessoas[1] = { ...plan.pessoas[1], funcao: "210", funcao_descricao: "Eletricista" };
+  plan.ordens[0].dados.wplabor = [{ craft: "180", orgid: "BR", laborhrs: 6 }];
+  plan.ordens.push({ siteid: "RES", wonum: "PM2", dados: { worktype: "S", wplabor: [
+    { craft: "210", orgid: "BR", laborhrs: 3 },
+  ] } });
+  plan.requisitos["RES:PM2"] = { ...plan.requisitos["RES:PM1"], duracao: 3, pessoas: 1, funcao: "210" };
+  plan.blocos = [{ id: "pm-block", ot: "RES:PM1", dia: plan.inicio, inicio: 0, horas: 2, executantes: ["A"] }];
+  const workload = specialtyWorkload(plan);
+  const mechanic = workload.find((row) => row.funcao === "180");
+  const electrician = workload.find((row) => row.funcao === "210");
+  assert.deepEqual([mechanic.horasPM, mechanic.capacidade, mechanic.comprometido, mechanic.saldo, mechanic.ordensPM], [6, 16, 2, 14, 1]);
+  assert.deepEqual([electrician.horasPM, electrician.capacidade, electrician.comprometido, electrician.saldo, electrician.ordensPM], [3, 16, 0, 16, 1]);
 });
 
 test("exact cell drop on a full day keeps intention pending rather than exceeding daily reference", () => {
@@ -221,8 +348,11 @@ test("BMA suggested days use target/planned dates clipped to planning days, with
   const plan = fixture(), order = plan.ordens[0];
   order.dados = { targstartdate: plan.inicio, targcompdate: plan.fim, sneconstraint: "2026-10-01" };
   assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim, "2026-10-28"]), [plan.inicio, plan.fim]);
+  assert.equal(isTargetDay(order, "2026-10-27"), true);
+  assert.equal(isTargetDay(order, "2026-10-28"), false);
   order.dados = { schedstart: `${plan.fim}T08:00:00-03:00` };
   assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim]), [plan.fim]);
+  assert.equal(isTargetDay(order, plan.fim), false);
   order.dados = { sneconstraint: plan.inicio };
   assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim]), []);
 });

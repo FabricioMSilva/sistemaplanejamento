@@ -1,7 +1,8 @@
 import type { Allocation, PlanPerson, Requirement, WorkPlan } from "@/services/pcm";
 import { orderKey } from "@/services/pcm";
 import { cellText, getWorkType } from "@/utils/orderFilters";
-import { localDate } from "@/utils/pcmDashboard";
+import { numericField, localDate } from "@/utils/pcmDashboard";
+import { plannedLabor } from "@/utils/plannedLabor";
 
 export const activityMode = (order: WorkPlan["ordens"][number]) => getWorkType(order) === "E" ? "corretiva" : "pm";
 export function activityCategory(order: WorkPlan["ordens"][number]): string {
@@ -13,12 +14,54 @@ export const specialtyMatches = (person: PlanPerson, requirement: Requirement) =
   requirement.todas_especialidades === true || (person.orgid === requirement.orgid && person.funcao === requirement.funcao);
 export const allocatedDuration = (plan: WorkPlan, key: string) =>
   plan.blocos.filter((b) => b.ot === key).reduce((sum, b) => sum + b.horas, 0);
+export function prepareDraggedOrder(plan: WorkPlan, key: string): WorkPlan {
+  const order = plan.ordens.find((item) => orderKey(item) === key);
+  const requirement = plan.requisitos[key];
+  if (!order || !requirement) return plan;
+  const people = requirement.pessoas && requirement.pessoas > 0 ? requirement.pessoas : 1;
+  const estimatedDuration = numericField(order, "estdur");
+  const estimatedLabor = numericField(order, "estlabhrs");
+  const duration = requirement.duracao && requirement.duracao > 0 ? requirement.duracao
+    : estimatedDuration && estimatedDuration > 0 ? estimatedDuration
+      : estimatedLabor && estimatedLabor > 0 ? estimatedLabor / people : null;
+  const hasSpecialty = !!requirement.todas_especialidades || !!(requirement.orgid && requirement.funcao);
+  return { ...plan, requisitos: { ...plan.requisitos, [key]: {
+    ...requirement, duracao: duration, pessoas: people,
+    todas_especialidades: hasSpecialty ? requirement.todas_especialidades : true,
+  } } };
+}
 export function pendingActivity(plan: WorkPlan, key: string): boolean {
   const duration = plan.requisitos[key]?.duracao;
   return !duration || allocatedDuration(plan, key) < duration - 1e-6;
 }
+export function activityPlanningComplete(plan: WorkPlan, key: string): boolean {
+  const requirement = plan.requisitos[key];
+  if (!requirement?.duracao || !requirement.pessoas
+    || (!requirement.todas_especialidades && (!requirement.funcao || !requirement.orgid))
+    || pendingActivity(plan, key)) return false;
+  const blocks = plan.blocos.filter((block) => block.ot === key);
+  return blocks.length > 0 && blocks.every((block) => block.executantes.length === requirement.pessoas);
+}
+export function readyForAutoConfirmation(plan: WorkPlan): boolean {
+  if (!plan.blocos.length || plan.posicionamentos?.length || conflictingBlocks(plan).size) return false;
+  const scheduled = new Set(plan.blocos.map((block) => block.ot));
+  return [...scheduled].every((key) => activityPlanningComplete(plan, key))
+    && Object.entries(plan.requisitos).every(([key, requirement]) =>
+      !requirement.selecionada || activityPlanningComplete(plan, key));
+}
 export const dayLoad = (plan: WorkPlan, person: string, day: string) =>
   plan.blocos.filter((b) => b.dia === day && b.executantes.includes(person)).reduce((sum, b) => sum + b.horas, 0);
+export function provisionalDayLoad(plan: WorkPlan, person: string, day: string): number {
+  const placements = new Set((plan.posicionamentos ?? [])
+    .filter((placement) => placement.executante === person && placement.dia === day)
+    .map((placement) => placement.ot));
+  return [...placements].reduce((sum, key) => {
+    const duration = plan.requisitos[key]?.duracao;
+    return sum + (duration ? Math.max(0, duration - allocatedDuration(plan, key)) : 0);
+  }, 0);
+}
+export const displayedDayLoad = (plan: WorkPlan, person: string, day: string) =>
+  dayLoad(plan, person, day) + provisionalDayLoad(plan, person, day);
 export const availableDay = (plan: WorkPlan, person: string, day: string) =>
   !!plan.pessoas.find((p) => p.id === person)?.dias.includes(day)
   && !plan.indisponibilidades.some((a) => a.executante === person && a.dia === day);
@@ -28,6 +71,21 @@ export function proposedDays(order: WorkPlan["ordens"][number], days: string[]):
     const start = localDate(cellText(order, a)), end = localDate(cellText(order, b));
     return start && end && start <= end ? start <= day && day <= end : day === start || day === end;
   }));
+}
+
+export function isTargetDay(order: WorkPlan["ordens"][number], day: string): boolean {
+  const start = localDate(cellText(order, "targstartdate"));
+  const end = localDate(cellText(order, "targcompdate"));
+  return start && end && start <= end ? start <= day && day <= end : day === start || day === end;
+}
+
+export function activityDateConstraintError(order: WorkPlan["ordens"][number], day: string): string | null {
+  const earliest = localDate(cellText(order, "sneconstraint"));
+  const latest = localDate(cellText(order, "fnlconstraint"));
+  const format = (value: string) => value.split("-").reverse().join("/");
+  if (earliest && day < earliest) return `${order.wonum}: não iniciar antes de ${format(earliest)}.`;
+  if (latest && day > latest) return `${order.wonum}: não terminar depois de ${format(latest)}.`;
+  return null;
 }
 
 export function scheduleSelectedDays(plan: WorkPlan, key: string, dates: string[], members: string[]): Allocation[] {
@@ -40,9 +98,10 @@ export function scheduleSelectedDays(plan: WorkPlan, key: string, dates: string[
     throw new Error("A atividade deve permanecer na mesma semana.");
   if (plan.blocos.some((b) => b.ot === key && b.executantes.length !== crew.length))
     throw new Error("A quantidade de executantes deve ser igual nos blocos da OT. Retire os blocos anteriores para mudar a equipe simultânea.");
-  const earliest = localDate(cellText(order, "sneconstraint")), latest = localDate(cellText(order, "fnlconstraint"));
-  if (days.some((d) => d < plan.inicio || d > plan.fim || (earliest && d < earliest) || (latest && d > latest)))
-    throw new Error("Dia fora do horizonte ou das restrições de data da OT.");
+  if (days.some((d) => d < plan.inicio || d > plan.fim))
+    throw new Error("Dia fora do horizonte do planejamento.");
+  const dateError = days.map((day) => activityDateConstraintError(order, day)).find(Boolean);
+  if (dateError) throw new Error(dateError);
   if (crew.some((id) => {
     const person = plan.pessoas.find((p) => p.id === id);
     return !person || !specialtyMatches(person, req) || days.some((d) => !availableDay(plan, id, d));
@@ -158,6 +217,61 @@ export function planningMetrics(plan: WorkPlan) {
   return { capacity, pm, corrective, remaining: capacity - pm - corrective };
 }
 
+export function specialtyWorkload(plan: WorkPlan) {
+  type Group = {
+    orgid: string; funcao: string; nome: string; ordens: Set<string>;
+    horasPM: number; estimativasPendentes: Set<string>; capacidade: number; comprometido: number;
+  };
+  const groups = new Map<string, Group>();
+  const people = new Map(plan.pessoas.map((person) => [person.id, person]));
+  const groupFor = (orgid: string, funcao: string, nome?: string) => {
+    const key = JSON.stringify([orgid, funcao]);
+    let group = groups.get(key);
+    if (!group) {
+      group = { orgid, funcao, nome: nome || (funcao ? `Especialidade ${funcao}` : "Não definida"),
+        ordens: new Set(), horasPM: 0, estimativasPendentes: new Set(), capacidade: 0, comprometido: 0 };
+      groups.set(key, group);
+    } else if (nome && group.nome.startsWith("Especialidade ")) group.nome = nome;
+    return group;
+  };
+
+  for (const person of plan.pessoas) {
+    const group = groupFor(person.orgid, person.funcao, person.funcao_descricao);
+    group.capacidade += person.dias.filter((day) => availableDay(plan, person.id, day)).length * 8;
+  }
+  for (const block of plan.blocos) {
+    for (const personId of block.executantes) {
+      const person = people.get(personId);
+      if (person) groupFor(person.orgid, person.funcao, person.funcao_descricao).comprometido += block.horas;
+    }
+  }
+  for (const order of plan.ordens) {
+    if (activityMode(order) !== "pm") continue;
+    const key = orderKey(order), requirement = plan.requisitos[key];
+    const labor = plannedLabor(order);
+    const rows = labor.length ? labor.map((item) => ({
+      orgid: item.orgid || requirement?.orgid || "",
+      funcao: item.craft,
+      nome: undefined as string | undefined,
+      horas: item.hours.trim() ? Number(item.hours) : Number.NaN,
+    })) : [{
+      orgid: requirement?.orgid ?? "", funcao: requirement?.funcao ?? "", nome: undefined as string | undefined,
+      horas: numericField(order, "estlabhrs") ?? (requirement?.duracao && requirement.pessoas
+        ? requirement.duracao * requirement.pessoas : Number.NaN),
+    }];
+    for (const row of rows) {
+      const group = groupFor(row.orgid, row.funcao, row.nome);
+      group.ordens.add(key);
+      if (Number.isFinite(row.horas) && row.horas >= 0) group.horasPM += row.horas;
+      else group.estimativasPendentes.add(key);
+    }
+  }
+  return [...groups.values()].map((group) => ({
+    ...group, ordensPM: group.ordens.size, estimativasPendentes: group.estimativasPendentes.size,
+    saldo: group.capacidade - group.comprometido,
+  })).sort((a, b) => b.horasPM - a.horasPM || a.nome.localeCompare(b.nome));
+}
+
 export function dropActivity(
   plan: WorkPlan, key: string, day: string, personId: string, blockId?: string, sourcePerson?: string,
 ): Allocation[] {
@@ -165,10 +279,9 @@ export function dropActivity(
   if (!req?.duracao || !req.pessoas || (!req.todas_especialidades && (!req.funcao || !req.orgid)))
     throw new Error("Prepare a OT: duração, pessoas e especialidade.");
   const order = plan.ordens.find((o) => orderKey(o) === key);
-  const earliest = order && localDate(cellText(order, "sneconstraint"));
-  const latest = order && localDate(cellText(order, "fnlconstraint"));
-  if (day < plan.inicio || day > plan.fim || (earliest && day < earliest) || (latest && day > latest))
-    throw new Error("Dia fora do horizonte ou das restrições de data da OT.");
+  if (day < plan.inicio || day > plan.fim) throw new Error("Dia fora do horizonte do planejamento.");
+  const dateError = order && activityDateConstraintError(order, day);
+  if (dateError) throw new Error(dateError);
   const previous = plan.blocos.find((b) => b.id === blockId);
   const blocks = plan.blocos.filter((b) => b.id !== blockId);
   const snapshot = { ...plan, blocos: blocks };
@@ -220,7 +333,8 @@ export function distributeBatch(plan: WorkPlan, keys: string[], personId: string
     let remaining = Math.max(0, req.duracao - allocatedDuration({ ...plan, blocos: blocks }, key));
     if (exactDay && keys.length === 1 && remaining > 1e-6) {
       if (!days.includes(fromDay)) {
-        messages.push(`${order.wonum}: o dia escolhido está indisponível ou fora da semana/restrições da OT. Nenhum outro dia foi usado.`);
+        messages.push(activityDateConstraintError(order, fromDay)
+          ?? `${order.wonum}: o dia escolhido está indisponível ou fora da semana/restrições da OT. Nenhum outro dia foi usado.`);
         continue;
       }
       const snapshot = { ...plan, blocos: blocks };

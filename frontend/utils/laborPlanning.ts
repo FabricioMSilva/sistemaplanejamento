@@ -7,6 +7,41 @@ export type ConfiguracaoExecutante = Omit<ExecutantePlanejado, "jornada"> & {
 export const chaveExecutante = (person: { orgid: string; matricula: string }) =>
   JSON.stringify([person.orgid, person.matricula]);
 
+type PlannerPerson = Pick<Profissional, "matricula" | "nome">;
+const normalizePlannerSearch = (value: string) => value.trim().normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR");
+
+export function formatPlannerIdentity(person: PlannerPerson): string {
+  const matricula = person.matricula.trim(), nome = person.nome.trim();
+  if (!matricula || !nome) throw new Error("O funcionário precisa ter matrícula e nome cadastrados.");
+  return `${matricula} - ${nome}`.toLocaleUpperCase("pt-BR");
+}
+
+export function searchPlannerPeople(query: string, people: PlannerPerson[]): PlannerPerson[] {
+  const normalized = normalizePlannerSearch(query);
+  if (!normalized) return [];
+  return people.filter((person) => person.matricula.trim() && person.nome.trim()
+    && (normalizePlannerSearch(person.matricula).includes(normalized)
+      || normalizePlannerSearch(person.nome).includes(normalized)))
+    .slice(0, 8);
+}
+
+export function resolvePlannerIdentity(value: string, people: PlannerPerson[]): string {
+  const query = normalizePlannerSearch(value);
+  const matches = new Map<string, PlannerPerson>();
+  for (const person of people) {
+    let identity: string;
+    try { identity = formatPlannerIdentity(person); } catch { continue; }
+    if ([person.matricula, person.nome, identity].some((candidate) => normalizePlannerSearch(candidate) === query))
+      matches.set(identity, person);
+  }
+  if (matches.size !== 1) {
+    throw new Error(matches.size ? "Nome ambíguo. Selecione o funcionário correto na lista."
+      : "Planejador não encontrado. Selecione um funcionário da lista carregada.");
+  }
+  return [...matches.keys()][0];
+}
+
 const DAY = 86400000;
 function dayNumber(value: string): number {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000-")) return NaN;

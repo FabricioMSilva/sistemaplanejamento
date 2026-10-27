@@ -3,6 +3,7 @@ from datetime import date
 from io import BytesIO
 from math import ceil
 from pathlib import Path
+import re
 from xml.sax.saxutils import escape
 
 from reportlab.graphics.shapes import Circle, Drawing, Group, Line, PolyLine, Rect, String, Wedge
@@ -26,7 +27,7 @@ GREEN = colors.HexColor("#19794A")
 ORANGE = colors.HexColor("#A56800")
 RED = colors.HexColor("#B83B38")
 WEEKDAYS = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
-BRAND_IMAGE = Path(__file__).resolve().parents[1] / "assets" / "michelin-header.png"
+BRAND_IMAGE = Path(__file__).resolve().parents[1] / "assets" / "LogoMichelin-transparente.png"
 
 
 def number(value):
@@ -35,6 +36,13 @@ def number(value):
 
 def formatted_day(value):
     return date.fromisoformat(value).strftime("%d/%m/%Y")
+
+
+def formatted_optional_day(value):
+    try:
+        return formatted_day(str(value or "")[:10])
+    except ValueError:
+        return "—"
 
 
 def icon(kind, x=0, y=0, size=22, color=BLUE):
@@ -93,17 +101,32 @@ def summary(doc):
         daily[block["dia"]] += block["horas"] * len(block["executantes"])
         used_people.update(block["executantes"])
     groups = {"Programadas": [], "Parciais": [], "Não alocadas": []}
+    corrective_by_status = defaultdict(int)
+    groups_by_type = {kind: {status: 0 for status in groups}
+                      for kind in ("PM1", "PM2", "PM3", "Outras PM")}
     for key in orders:
         duration = doc["requisitos"][key]["duracao"]
         status = "Não alocadas" if not allocated[key] else (
             "Programadas" if duration and allocated[key] >= duration - 1e-6 else "Parciais")
         groups[status].append(key)
+        mode = mode_for(orders[key])
+        if mode != "corretiva":
+            level = re.match(r"^PM\s*([123])\b", text(orders[key], "description").strip(), re.IGNORECASE)
+            kind = f"PM{level.group(1)}" if level else "Outras PM"
+            groups_by_type[kind][status] += 1
     absence = {(a["executante"], a["dia"]) for a in doc["indisponibilidades"]}
     capacity = sum(8 for p in doc["pessoas"] for day in p["dias"] if (p["id"], day) not in absence)
     locations = {text(orders[key], "location").strip() for key in allocated if allocated[key]}
     locations.discard("")
+    unprogrammed_corrective = [key for key in groups["Não alocadas"]
+                               if mode_for(orders[key]) == "corretiva"]
+    for key in unprogrammed_corrective:
+        corrective_by_status[text(orders[key], "status").strip().upper() or "SEM STATUS"] += 1
     return {"orders": orders, "allocated": allocated, "daily": dict(sorted(daily.items())),
-            "groups": groups, "hours": sum(daily.values()), "capacity": capacity,
+            "groups": groups, "corrective_by_status": dict(sorted(corrective_by_status.items())),
+            "unprogrammed_corrective": unprogrammed_corrective,
+            "groups_by_type": groups_by_type,
+            "hours": sum(daily.values()), "capacity": capacity,
             "people": len(used_people), "locations": len(locations), "conflicts": conflicts}
 
 
@@ -166,6 +189,73 @@ def dashboard(data, width):
     return drawing
 
 
+def status_count_chart(data, width):
+    height = 116
+    drawing = Drawing(width, height)
+    rows = list(data["corrective_by_status"].items())
+    maximum = max((value for _, value in rows), default=0) or 1
+    left, right, bottom, top = 42, width - 10, 24, 82
+    plot_height = top - bottom
+    drawing.add(String(0, 103, "BACKLOG · OTs TIPO E NÃO ALOCADAS POR STATUS", fontName="Helvetica-Bold", fontSize=8, fillColor=BLUE))
+    drawing.add(Rect(8, 88, 8, 6, fillColor=BLUE, strokeColor=None))
+    drawing.add(String(20, 88, "Quantidade", fontSize=6.5, fillColor=INK))
+    for tick in range(5):
+        fraction = tick / 4
+        y = bottom + plot_height * fraction
+        drawing.add(Line(left, y, right, y, strokeColor=colors.HexColor("#E4EAF2"), strokeWidth=.45))
+        drawing.add(String(left - 5, y - 2, str(round(maximum * fraction)), textAnchor="end", fontSize=5.5, fillColor=MUTED))
+    step = (right - left) / max(1, len(rows))
+    bar_width = min(32, max(8, step * .58))
+    status_font_size = max(4.4, min(6.5, step / 5))
+    for index, (status, count) in enumerate(rows):
+        center = left + step * (index + .5)
+        bar_height = plot_height * count / maximum
+        drawing.add(Rect(center - bar_width / 2, bottom, bar_width, bar_height, fillColor=BLUE, strokeColor=None))
+        drawing.add(String(center, bottom + bar_height + 2, str(count), textAnchor="middle",
+                           fontName="Helvetica-Bold", fontSize=6.5, fillColor=INK))
+        drawing.add(String(center, bottom - 12, status, textAnchor="middle", fontSize=status_font_size, fillColor=INK))
+    if not any(count for _, count in rows):
+        drawing.add(String((left + right) / 2, 52, "Sem OTs tipo E", textAnchor="middle", fontSize=8, fillColor=MUTED))
+    return drawing
+
+
+def pm_status_chart(data, width):
+    height = 124
+    drawing = Drawing(width, height)
+    statuses = (("Programadas", GREEN), ("Parciais", ORANGE),
+                ("Não alocadas", colors.HexColor("#9AACC4")))
+    groups = data["groups_by_type"]
+    maximum = max((counts[status] for counts in groups.values() for status, _ in statuses), default=0) or 1
+    left, right, bottom, top = 42, width - 10, 25, 88
+    plot_height = top - bottom
+    drawing.add(String(0, 111, "PM · QUANTIDADE POR TIPO E STATUS", fontName="Helvetica-Bold", fontSize=8, fillColor=BLUE))
+    for index, (label, color) in enumerate(statuses):
+        x = 8 + index * 126
+        drawing.add(Rect(x, 96, 8, 7, fillColor=color, strokeColor=None))
+        drawing.add(String(x + 12, 96, label, fontSize=6.2, fillColor=INK))
+    for tick in range(4):
+        fraction = tick / 3
+        y = bottom + plot_height * fraction
+        drawing.add(Line(left, y, right, y, strokeColor=colors.HexColor("#E4EAF2"), strokeWidth=.45))
+        drawing.add(String(left - 5, y - 2, str(round(maximum * fraction)), textAnchor="end", fontSize=5.5, fillColor=MUTED))
+    step = (right - left) / max(1, len(groups))
+    bar_width = 15
+    bar_gap = 3
+    for index, (kind, counts) in enumerate(groups.items()):
+        center = left + step * (index + .5)
+        start = center - (len(statuses) * bar_width + (len(statuses) - 1) * bar_gap) / 2
+        for bar_index, (status, color) in enumerate(statuses):
+            count = counts[status]
+            bar_height = plot_height * count / maximum
+            x = start + bar_index * (bar_width + bar_gap)
+            if count:
+                drawing.add(Rect(x, bottom, bar_width, bar_height, fillColor=color, strokeColor=None))
+            drawing.add(String(x + bar_width / 2, bottom + bar_height + 2, str(count), textAnchor="middle",
+                               fontName="Helvetica-Bold", fontSize=5.5, fillColor=INK))
+        drawing.add(String(center, 8, kind, textAnchor="middle", fontSize=6.5, fillColor=INK))
+    return drawing
+
+
 def render_schedule(doc):
     output = BytesIO()
     # Platypus adds 6 pt of frame padding; keep the visible content on the 24 pt grid.
@@ -206,9 +296,10 @@ def render_schedule(doc):
         w, h = A4
         canvas.setFillColor(NAVY)
         canvas.rect(0, h - 88, w, 88, fill=1, stroke=0)
-        canvas.setFillColor(BLUE)
+        canvas.setFillColor(colors.HexColor("#F7F9FC"))
         canvas.rect(0, h - 88, 215, 88, fill=1, stroke=0)
-        canvas.drawImage(str(BRAND_IMAGE), 8, h - 80, width=203, height=72, mask="auto")
+        canvas.drawImage(str(BRAND_IMAGE), 8, h - 80, width=203, height=72,
+                 mask="auto", preserveAspectRatio=True, anchor="c")
         canvas.setStrokeColor(colors.HexColor("#7F9DC4"))
         canvas.line(218, h - 12, 218, h - 76)
         canvas.setFillColor(YELLOW)
@@ -282,25 +373,21 @@ def render_schedule(doc):
         by_day[block["dia"]].append(block)
     for day, blocks in sorted(by_day.items()):
         label = f"{WEEKDAYS[date.fromisoformat(day).weekday()]} · {formatted_day(day)}"
-        headers = ("Dia", "Recurso / equipe", "OT / tipo", "Local", "Descrição", "h / HH", "Situação")
+        headers = ("Dia", "Recurso / equipe", "OT / tipo", "Local", "Descrição", "h / HH", "Data Limite")
         day_style = ParagraphStyle("day", parent=styles["body_center"], textColor=BLUE, fontName="Helvetica-Bold", fontSize=8, leading=12)
         day_label = Paragraph(f'{WEEKDAYS[date.fromisoformat(day).weekday()]}<br/>{date.fromisoformat(day).strftime("%d/%m")}', day_style)
         rows = [[p(h, "head_center" if index in (0, 2, 5, 6) else "head") for index, h in enumerate(headers)]]
         for block in blocks:
             key = block["ot"]
             order = orders[key]
-            duration = doc["requisitos"][key]["duracao"]
-            complete = duration and data["allocated"][key] >= duration - 1e-6
-            overloaded = block["id"] in data["conflicts"]
-            status_style = ParagraphStyle("status", parent=styles["small_center"], textColor=RED if overloaded else GREEN if complete else ORANGE, fontName="Helvetica-Bold")
             rows.append([
                 day_label,
                 p("\n".join(people[member] for member in block["executantes"])),
-                p(f'{order["wonum"]}\n{"PM" if mode_for(order) == "pm" else "COR"} · {text(order, "worktype")}', "body_center"),
+                p(f'{order["wonum"]}\n{text(order, "worktype").strip().upper() or "—"}', "body_center"),
                 p(text(order, "location") or "Não informado"),
                 p(text(order, "description")),
                 p(f'{number(block["horas"])} h\n{number(block["horas"] * len(block["executantes"]))} HH', "body_center"),
-                Paragraph("Excesso semanal" if overloaded else "Programada" if complete else "Parcial", status_style),
+                p(formatted_optional_day(text(order, "targcompdate")), "body_center"),
             ])
         total_row = [p(f'TOTAL DO DIA · {formatted_day(day)}', "label"), "", "", "", "",
                      p(f'{number(data["daily"][day])} HH', "body_center"), ""]
@@ -323,32 +410,13 @@ def render_schedule(doc):
             content.extend([grid, Spacer(1, 5)])
     if not by_day:
         content.extend([p("Nenhuma atividade alocada nesta revisão."), Spacer(1, 12)])
-    content.extend([Spacer(1, 7), dashboard(data, width), Spacer(1, 8),
+    content.extend([Spacer(1, 7), dashboard(data, width), Spacer(1, 6),
+                    status_count_chart(data, width), Spacer(1, 4), pm_status_chart(data, width), Spacer(1, 8),
                     p("Tempo = duração do bloco. HH = duração × executantes simultâneos. "
                       "OTs distintas são contadas uma vez, mesmo quando divididas entre dias. "
-                      "Situação indica cobertura da alocação, não criticidade nem status de execução.", "small")])
-    pending = data["groups"]["Parciais"] + data["groups"]["Não alocadas"]
-    if pending or doc["indisponibilidades"]:
+                      "As categorias de situação indicam cobertura da alocação, não criticidade nem status de execução.", "small")])
+    if doc["indisponibilidades"]:
         content.extend([PageBreak(), p("PREPARAÇÃO E PENDÊNCIAS DO PLANEJAMENTO", "title")])
-    if pending:
-        content.append(p(f"Carteira não alocada ou parcial · {len(pending)} OTs", "title"))
-        rows = [[p(h, "head") for h in ("OT / tipo", "Atividade", "Duração", "Restrição / observação")]]
-        for key in pending:
-            order = orders[key]
-            req = doc["requisitos"][key]
-            rows.append([p(f'{order["wonum"]}\n{mode_for(order)}'), p(text(order, "description")),
-                         p(f'{number(data["allocated"][key])} / {number(req["duracao"]) if req["duracao"] else "?"} h'),
-                         p(req["observacao"] or "Sem observação registrada")])
-        content.extend([table(rows, [80, width - 80 - 65 - 150, 65, 150]), Spacer(1, 12)])
-    if doc.get("posicionamentos"):
-        content.append(p("OTs posicionadas no rascunho · dados/horas pendentes", "title"))
-        rows = [[p(h, "head") for h in ("Dia", "Integrante", "OT / atividade", "Situação")]]
-        for item in doc["posicionamentos"]:
-            order = orders[item["ot"]]
-            rows.append([p(formatted_day(item["dia"])), p(people[item["executante"]]),
-                         p(f'{order["wonum"]} · {text(order, "description")}'),
-                         p("Posicionada · não confirmada. Sem reserva adicional de horas.")])
-        content.extend([table(rows, [65, 120, width - 65 - 120 - 105, 105]), Spacer(1, 12)])
     if doc["indisponibilidades"]:
         content.append(p("Indisponibilidades registradas", "title"))
         rows = [[p(h, "head") for h in ("Dia", "Integrante", "Motivo")]]

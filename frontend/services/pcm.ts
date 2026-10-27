@@ -28,6 +28,17 @@ export type WorkPlan = {
 export type PlanSummary = Pick<WorkPlan, "id" | "revisao" | "status" | "inicio" | "fim" | "setores" | "planejador" | "atualizado_em" | "motivo">;
 export type PlanRevision = { revisao: number; salvo_em: string; motivo: string };
 export type PlanChange = Pick<WorkPlan, "revisao" | "requisitos" | "blocos" | "indisponibilidades" | "posicionamentos"> & { motivo: string; confirmar: boolean; atualizar_especialidades?: boolean };
+export type BmaPageField = { tag: string; id: string; name: string; label: string; type: string; disabled: boolean; frame?: string };
+export type BmaPageMonitor = {
+  monitor_id: string; status: "starting" | "monitoring" | "stopping" | "stopped" | "failed";
+  message: string; fields: BmaPageField[]; elapsed_seconds?: number;
+  stage?: string; selected_wonums?: string[]; opened_wonum?: string | null;
+  page_url?: string; page_title?: string;
+};
+export type BmaOrderPlan = {
+  siteid: string; wonum: string; planned_start: string; planned_finish: string; specialty: string;
+  assignments: { dia: string; laborcode: string; horas: number }[];
+};
 export const orderKey = (order: OrdemTrabalho) => `${order.siteid}:${order.wonum}`;
 const BASE = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/pcm`;
 
@@ -42,12 +53,18 @@ async function request<T>(path: string, method = "GET", payload?: unknown): Prom
 export const createWorkPlan = (setores: string[]) => request<WorkPlan>("/planos", "POST", { setores });
 export const getWorkPlan = (id: string) => request<WorkPlan>(`/planos/${encodeURIComponent(id)}`);
 export const listWorkPlans = () => request<PlanSummary[]>("/planos");
+export const deleteWorkPlan = (id: string) => request<{ id: string; deleted: boolean }>(`/planos/${encodeURIComponent(id)}`, "DELETE");
 export const saveWorkPlan = (id: string, change: PlanChange) => request<WorkPlan>(`/planos/${id}`, "PUT", change);
+export const updateWorkPlanTeam = (id: string, revisao: number, equipe: PlanejamentoEquipe) =>
+  request<WorkPlan>(`/planos/${encodeURIComponent(id)}/equipe`, "PUT", { revisao, equipe });
 export const suggestWorkPlan = (id: string, modo: PlanningMode, alteracoes: PlanChange, ordens: string[]) =>
   request<{ blocos: Allocation[]; mensagens: string[] }>(`/planos/${id}/sugerir`, "POST", { modo, alteracoes, ordens });
 export const getRevisions = (id: string) => request<PlanRevision[]>(`/planos/${id}/revisoes`);
 export const refreshPlanSpecialties = (id: string, change: PlanChange) =>
   request<{ plano: WorkPlan; atualizadas: number }>(`/planos/${id}/especialidades`, "POST", change);
+export const startBmaPageMonitor = (orders: BmaOrderPlan[]) => request<{ monitor_id: string }>("/bma-page-monitor", "POST", { orders });
+export const getBmaPageMonitor = (id: string) => request<BmaPageMonitor>(`/bma-page-monitor/${encodeURIComponent(id)}`);
+export const stopBmaPageMonitor = (id: string) => request<BmaPageMonitor>(`/bma-page-monitor/${encodeURIComponent(id)}`, "DELETE");
 
 async function download(path: string, name: string, payload?: unknown) {
   const response = await fetch(`${BASE}${path}`, payload === undefined ? undefined : {
@@ -62,6 +79,11 @@ async function download(path: string, name: string, payload?: unknown) {
 }
 export const downloadSchedule = (id: string, revision: number) =>
   download(`/planos/${id}/revisoes/${revision}/pdf`, `cronograma-${id}-r${revision}.pdf`);
+export const getSchedulePdf = async (id: string, revision: number): Promise<Blob> => {
+  const response = await fetch(`${BASE}/planos/${encodeURIComponent(id)}/revisoes/${revision}/pdf`);
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.blob();
+};
 export const exportPortfolio = (setores: string[], inicio: string, fim: string, modo: PlanningMode, ordens: OrdemTrabalho[]) =>
   download("/exportar", `carteira-${modo}-${inicio || "carteira-aberta"}.xlsx`, { setores, inicio: inicio || null, fim: fim || null, modo, ordens: ordens.map(orderKey) });
 export const exportNfeReport = (jobId: string) =>

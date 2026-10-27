@@ -94,8 +94,8 @@ class BMAService:
             raise BMAServiceError("Um ou mais códigos de setor são inválidos.")
         selected_sectors = [sector.upper() for sector in selected_sectors]
 
-        self._report(progress, "navegador", "Abrindo Firefox para acessar o BMA.")
-        driver = self._create_browser()
+        self._report(progress, "navegador", "Acessando o BMA em segundo plano.")
+        driver = self._create_browser(headless=True)
         records: list[dict[str, Any]] = []
         try:
             self._report(progress, "quickrep", "Abrindo Relatório rápido do BMA.")
@@ -315,16 +315,18 @@ class BMAService:
             link = info.get("nextPage") or payload.get("nextPage")
         raise BMAServiceError("Paginação de mão de obra planejada excedeu o limite de segurança.")
 
-    def _create_browser(self):
+    def _create_browser(self, *, page_load_strategy: str = "normal", headless: bool = False):
         options = webdriver.FirefoxOptions()
+        options.page_load_strategy = page_load_strategy
+        if headless:
+            options.add_argument("-headless")
         options.add_argument("-width=1400")
         options.add_argument("-height=900")
         firefox_binary = os.getenv("BMA_FIREFOX_BINARY", "").strip()
         if firefox_binary:
             options.binary_location = firefox_binary
 
-        local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home()))
-        profile_dir = local_app_data / "BMA_Automacao" / "FirefoxProfile"
+        profile_dir = self._browser_profile_dir()
         profile_dir.mkdir(parents=True, exist_ok=True)
         options.profile = str(profile_dir)
         options.set_preference(
@@ -339,7 +341,7 @@ class BMAService:
         try:
             if not firefox_binary and not shutil.which("firefox"):
                 candidates = (
-                    local_app_data / "Mozilla Firefox" / "firefox.exe",
+                    Path(os.getenv("LOCALAPPDATA", Path.home())) / "Mozilla Firefox" / "firefox.exe",
                     Path(os.getenv("PROGRAMFILES", "C:/Program Files"))
                     / "Mozilla Firefox" / "firefox.exe",
                     Path(os.getenv("PROGRAMFILES(X86)", "C:/Program Files (x86)"))
@@ -354,6 +356,23 @@ class BMAService:
                 "Não foi possível abrir o Firefox para acessar o BMA. "
                 "Verifique se o Firefox está instalado e se o Selenium Manager pode iniciar o driver."
             ) from exc
+
+    @staticmethod
+    def _browser_profile_dir() -> Path:
+        local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home()))
+        return local_app_data / "BMA_Automacao" / "FirefoxProfile"
+
+    def clear_browser_cache_and_history(self) -> None:
+        profile_dir = self._browser_profile_dir()
+        for directory in ("cache2", "startupCache", "thumbnails", "storage", "sessionstore-backups"):
+            shutil.rmtree(profile_dir / directory, ignore_errors=True)
+        for filename in (
+            "places.sqlite", "places.sqlite-shm", "places.sqlite-wal",
+            "cookies.sqlite", "cookies.sqlite-shm", "cookies.sqlite-wal",
+            "storage.sqlite", "webappsstore.sqlite", "formhistory.sqlite",
+            "sessionstore.jsonlz4",
+        ):
+            (profile_dir / filename).unlink(missing_ok=True)
 
     @staticmethod
     def _report(
@@ -374,24 +393,58 @@ class BMAService:
     ) -> None:
         driver.set_page_load_timeout(self.timeout)
         driver.set_script_timeout(self.timeout)
+        login_clicked = False
 
         def quickrep_ready(current_driver):
+            nonlocal login_clicked
             current_driver.switch_to.default_content()
-            return self._find_quick_search(current_driver)
+            if self._find_quick_search(current_driver):
+                return True
+
+            page_url = current_driver.current_url
+            if not login_clicked and (
+                "auth.rbmanca4" in page_url or "login-fed.michelin.com" in page_url
+            ):
+                login_button = self._find_login_button(current_driver)
+                if login_button:
+                    self._report(
+                        progress,
+                        "autenticacao",
+                        "Acionando o login corporativo do BMA em segundo plano.",
+                    )
+                    login_button.click()
+                    login_clicked = True
+            return False
 
         try:
             self._report(
                 progress,
                 "autenticacao",
-                "Aguardando o Quickrep; conclua o login/MFA na janela do Firefox se solicitado.",
+                "Validando a sessão do BMA em segundo plano.",
             )
             WebDriverWait(driver, self.login_timeout, poll_frequency=0.5).until(quickrep_ready)
             self._report(progress, "autenticado", "Relatório rápido pronto para consulta.")
         except TimeoutException as exc:
             raise BMAServiceError(
-                "O Relatório rápido não abriu. Conclua o login/MFA na janela do Firefox "
-                "e tente novamente."
+                "O BMA exige autenticação interativa ou MFA. A coleta em segundo plano "
+                "não pode concluir essa etapa; use uma integração autorizada ou faça "
+                "a autenticação manual antes de tentar novamente."
             ) from exc
+
+    @staticmethod
+    def _find_login_button(driver):
+        elements = driver.find_elements(
+            By.XPATH, "//*[self::button or @role='button' or (self::input and @type='submit')]",
+        )
+        for element in elements:
+            label = " ".join((
+                element.text or "",
+                element.get_attribute("aria-label") or "",
+                element.get_attribute("value") or "",
+            )).strip().casefold()
+            if label == "efetuar login" and element.is_displayed() and element.is_enabled():
+                return element
+        return None
 
     @classmethod
     def _find_quick_search(cls, driver, depth: int = 0):

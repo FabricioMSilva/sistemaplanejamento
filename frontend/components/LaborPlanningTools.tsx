@@ -4,11 +4,12 @@ import {
   obterSincronizacao, salvarEquipePadrao, salvarVinculoNf,
   type ConferenciaNf, type HistoricoEquipe, type PlanejamentoEquipe,
 } from "@/services/api";
-import { chaveExecutante } from "@/utils/laborPlanning";
+import { chaveExecutante, formatPlannerIdentity, searchPlannerPeople, type Profissional } from "@/utils/laborPlanning";
 import { normalize } from "@/utils/orderFilters";
 
 type Props = {
   setores: string[]; planejador: string; setPlanejador: (value: string) => void;
+  profissionais: Profissional[];
   plan: () => PlanejamentoEquipe; valid: boolean; disabled: boolean;
   onApply: (plan: PlanejamentoEquipe) => void;
   onChanged: () => Promise<void>; onBusy: (busy: boolean) => void;
@@ -27,6 +28,10 @@ export default function LaborPlanningTools(props: Props) {
   const [linkChoices, setLinkChoices] = useState<Record<number, string>>({});
   const isNf = setores.some((sector) => sector.toUpperCase() === "RES-TC-NF");
   const disabled = busy || props.disabled;
+  const plannerMatches = searchPlannerPeople(props.planejador, props.profissionais);
+  const canonicalPlanner = props.profissionais.some((person) => {
+    try { return formatPlannerIdentity(person) === props.planejador; } catch { return false; }
+  });
   useEffect(() => {
     let cancelled = false;
     Promise.all([listarHistoricoEquipe(setores), isNf ? obterConferenciaNf(setores) : Promise.resolve(null)])
@@ -73,24 +78,43 @@ export default function LaborPlanningTools(props: Props) {
     {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
     {message && <p role="status" className="text-sm text-sky-200">{message}</p>}
     <div className="flex flex-wrap items-end gap-3">
-      <label className="min-w-56 flex-1 text-xs text-slate-300">Planejador · nome ou matrícula
-        <input aria-label="Planejador" maxLength={120} value={props.planejador} disabled={disabled}
+      <div className="relative min-w-56 flex-1 text-xs text-slate-300">
+        <label htmlFor="planner-identity">Planejador · nome ou matrícula</label>
+        <input id="planner-identity" role="combobox" aria-label="Planejador" aria-autocomplete="list"
+          aria-expanded={Boolean(props.planejador.trim() && plannerMatches.length && !canonicalPlanner)}
+          aria-controls="planner-identity-options" maxLength={120} value={props.planejador} disabled={disabled}
           onChange={(event) => props.setPlanejador(event.target.value)}
           className="mt-1 block w-full rounded border border-white/20 bg-navy-950 p-2 text-sm" />
-      </label>
+        {props.planejador.trim() && !canonicalPlanner && <ul id="planner-identity-options" role="listbox"
+          className="absolute z-20 mt-1 max-h-48 w-full overflow-y-auto rounded border border-white/20 bg-navy-950 shadow-lg">
+          {plannerMatches.length ? plannerMatches.map((person) => {
+            const identity = formatPlannerIdentity(person);
+            return <li key={`${person.matricula}-${person.nome}`} role="option" aria-selected="false">
+              <button type="button" disabled={disabled} onClick={() => props.setPlanejador(identity)}
+                className="w-full px-3 py-2 text-left text-sm text-white hover:bg-white/10">
+                {identity}
+              </button>
+            </li>;
+          }) : <li className="px-3 py-2 text-sm text-slate-400">Nenhum funcionário correspondente na lista carregada.</li>}
+        </ul>}
+      </div>
       <button type="button" disabled={disabled} className="pcm-small-button" onClick={() => {
         setError(""); setMessage(""); working(true);
         atualizarMaoDeObra(setores).then((result) => setJob(result.job_id))
           .catch((reason: unknown) => { setError(explain(reason)); working(false); });
       }}>{job ? "Atualizando BMA / SharePoint…" : "Atualizar mão de obra"}</button>
       <button type="button" disabled={disabled || !props.planejador.trim()} className="pcm-small-button" onClick={() => void action(async () => {
-        const result = await obterEquipePadrao(setores, props.planejador.trim());
+        const identity = props.plan().planejador ?? "";
+        props.setPlanejador(identity);
+        const result = await obterEquipePadrao(setores, identity);
         if (!result) throw new Error("Nenhuma equipe padrão salva para este planejador e setor.");
         props.onApply(result); setMessage("Padrão aplicado com segunda a sexta disponíveis. Revise os dias e salve o planejamento.");
       })}>Usar minha equipe padrão</button>
       <button type="button" disabled={disabled || !props.valid || !props.planejador.trim()} className="pcm-small-button" onClick={() => void action(async () => {
-        await salvarEquipePadrao(props.plan());
-        localStorage.setItem("pcm-planejador", props.planejador.trim());
+        const plan = props.plan();
+        await salvarEquipePadrao(plan);
+        props.setPlanejador(plan.planejador ?? "");
+        localStorage.setItem("pcm-planejador", plan.planejador ?? "");
         setMessage("Equipe padrão salva por planejador e setor. Ao reutilizar, segunda a sexta virão marcados com 8 h/dia.");
       })}>Salvar como meu padrão</button>
     </div>

@@ -73,6 +73,24 @@ def init_db() -> None:
             ON ordens_trabalho (maintenanceshop, status)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ordens_trabalho_alteracoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                siteid TEXT NOT NULL,
+                wonum TEXT NOT NULL,
+                maintenanceshop TEXT NOT NULL,
+                alterado_em TEXT NOT NULL,
+                alteracoes_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ots_alteracoes_setor_data
+            ON ordens_trabalho_alteracoes (maintenanceshop, alterado_em)
+            """
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS especialidades (
                 orgid TEXT NOT NULL,
@@ -324,6 +342,37 @@ def upsert_ordens_trabalho(
             if maintenanceshop not in selected_sectors:
                 raise ValueError(f"A OT {wonum} retornou com setor fora da seleção.")
 
+            previous = conn.execute(
+                "SELECT dados_json FROM ordens_trabalho WHERE siteid = ? AND wonum = ?",
+                (siteid, wonum),
+            ).fetchone()
+            serialized_record = json.dumps(record, ensure_ascii=False)
+            if previous:
+                previous_record = json.loads(previous["dados_json"])
+                changes = {
+                    field: {
+                        "anterior": previous_record.get(field),
+                        "novo": record.get(field),
+                    }
+                    for field in sorted(previous_record.keys() | record.keys())
+                    if previous_record.get(field) != record.get(field)
+                }
+                if changes:
+                    conn.execute(
+                        """
+                        INSERT INTO ordens_trabalho_alteracoes (
+                            siteid, wonum, maintenanceshop, alterado_em, alteracoes_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            siteid,
+                            wonum,
+                            maintenanceshop,
+                            sincronizado_em,
+                            json.dumps(changes, ensure_ascii=False),
+                        ),
+                    )
+
             conn.execute(
                 """
                 INSERT INTO ordens_trabalho (
@@ -340,7 +389,7 @@ def upsert_ordens_trabalho(
                     wonum,
                     status,
                     maintenanceshop,
-                    json.dumps(record, ensure_ascii=False),
+                    serialized_record,
                     sincronizado_em,
                 ),
             )
@@ -581,6 +630,37 @@ def listar_ordens_trabalho(
             "maintenanceshop": row["maintenanceshop"],
             "dados": json.loads(row["dados_json"]),
             "sincronizado_em": row["sincronizado_em"],
+        }
+        for row in rows
+    ]
+
+
+def listar_alteracoes_ordens_trabalho(
+    setores: list[str], limit: int = 200,
+) -> list[dict[str, Any]]:
+    selected_sectors = list(dict.fromkeys(setor.upper() for setor in setores))
+    if not selected_sectors:
+        return []
+    placeholders = ", ".join("?" for _ in selected_sectors)
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, siteid, wonum, maintenanceshop, alterado_em, alteracoes_json
+            FROM ordens_trabalho_alteracoes
+            WHERE maintenanceshop IN ({placeholders})
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            [*selected_sectors, max(1, min(limit, 500))],
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "siteid": row["siteid"],
+            "wonum": row["wonum"],
+            "maintenanceshop": row["maintenanceshop"],
+            "alterado_em": row["alterado_em"],
+            "alteracoes": json.loads(row["alteracoes_json"]),
         }
         for row in rows
     ]

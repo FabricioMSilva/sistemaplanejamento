@@ -91,6 +91,7 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
 
         self.assertEqual(len(all_orders), 3)
         self.assertEqual(len(planned_orders), 1)
+        self.assertEqual(database.listar_alteracoes_ordens_trabalho(selected_sectors), [])
         self.assertEqual(planned_orders[0]["dados"]["customfield"], "preservado")
         self.assertEqual(planned_orders[0]["dados"]["sneconstraint"], "2026-10-31T23:00:00-04:00")
         self.assertEqual(planned_orders[0]["dados"]["children"][0]["wonum"], "RES1004")
@@ -101,6 +102,12 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
         updated_orders = database.listar_ordens_trabalho(["RES-TC-NF"], ["INPRG"])
         self.assertEqual(len(updated_orders), 1)
         self.assertEqual(updated_orders[0]["wonum"], "1001")
+        changes = database.listar_alteracoes_ordens_trabalho(["RES-TC-NF"])
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["alteracoes"]["status"], {"anterior": "WSCH", "novo": "INPRG"})
+
+        database.upsert_ordens_trabalho(records[:1], ["RES-TC-NF"])
+        self.assertEqual(len(database.listar_alteracoes_ordens_trabalho(["RES-TC-NF"])), 1)
 
     def test_rejects_orders_from_another_sector(self):
         record = {
@@ -123,6 +130,23 @@ class BMAOSLCTests(unittest.TestCase):
         }.issubset(fields))
         self.assertNotIn("*", fields)
         self.assertIn("wplabor{wplaborid,craft,orgid,quantity,laborhrs,skilllevel}", query["oslc.select"][0])
+
+    def test_wait_for_quickrep_clicks_primary_login_button_in_background(self):
+        service = BMAService()
+        driver = unittest.mock.Mock()
+        driver.current_url = "https://auth.rbmanca4.rosa-maximo-prod.aws.michelin.com/login/#/form"
+        login_button = unittest.mock.Mock()
+        wait = unittest.mock.Mock()
+        wait.until.side_effect = lambda condition: condition(driver) or condition(driver)
+
+        with (
+            patch("backend.services.BMAService.WebDriverWait", return_value=wait),
+            patch.object(service, "_find_quick_search", side_effect=[False, True]),
+            patch.object(service, "_find_login_button", return_value=login_button),
+        ):
+            service._wait_for_quickrep(driver)
+
+        login_button.click.assert_called_once_with()
 
     def test_planned_labor_is_paginated_and_invalid_pages_abort(self):
         service = BMAService()
@@ -245,7 +269,7 @@ class BMAOSLCTests(unittest.TestCase):
         service = BMAService()
 
         with (
-            patch.object(service, "_create_browser", return_value=driver),
+            patch.object(service, "_create_browser", return_value=driver) as create_browser,
             patch.object(service, "_wait_for_quickrep") as wait_for_quickrep,
             patch.object(service, "_fetch_payload", side_effect=pages) as fetch_page,
         ):
@@ -256,6 +280,7 @@ class BMAOSLCTests(unittest.TestCase):
             ])
 
         self.assertEqual([record["wonum"] for record in records], ["RES1001", "RES1002"])
+        create_browser.assert_called_once_with(headless=True)
         driver.get.assert_called_once_with(service.quickrep_url)
         wait_for_quickrep.assert_called_once_with(driver, None)
         first_url = fetch_page.call_args_list[0].args[1]

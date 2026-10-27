@@ -10,6 +10,7 @@ from models.database import (
     criar_sincronizacao,
     get_connection,
     listar_ordens_trabalho,
+    listar_alteracoes_ordens_trabalho,
     listar_mao_de_obra,
     listar_especialidades,
     obter_ultima_sincronizacao,
@@ -302,6 +303,14 @@ def listar_ots_planejamento(
     status: list[str] | None = Query(default=None),
 ):
     return listar_ordens_trabalho(setor, status)
+
+
+@router.get("/planejamento/ots/alteracoes")
+def listar_alteracoes_ots_planejamento(
+    setor: list[str] = Query(min_length=1, max_length=28),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    return listar_alteracoes_ordens_trabalho(setor, limit)
 
 
 @router.get("/dashboard")

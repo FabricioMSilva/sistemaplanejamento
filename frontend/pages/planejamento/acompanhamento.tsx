@@ -1,8 +1,8 @@
 import Head from "next/head";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CalendarDays, RefreshCw } from "lucide-react";
-import { listWorkPlans, type PlanSummary } from "@/services/pcm";
+import { CalendarDays, RefreshCw, Trash2 } from "lucide-react";
+import { deleteWorkPlan, listWorkPlans, type PlanSummary } from "@/services/pcm";
 import { formatPlanningDate } from "@/utils/laborPlanning";
 import { normalize } from "@/utils/orderFilters";
 
@@ -13,6 +13,8 @@ export default function FollowUpPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const [deleting, setDeleting] = useState("");
+  const [message, setMessage] = useState("");
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setError("");
@@ -23,6 +25,18 @@ export default function FollowUpPage() {
   }, [attempt]);
   const visible = plans.filter((p) => (!status || p.status === status)
     && normalize(`${p.planejador} ${p.setores.join(" ")} ${formatPlanningDate(p.inicio)} ${formatPlanningDate(p.fim)}`).includes(normalize(search)));
+  async function removePlan(plan: PlanSummary) {
+    const statusLabel = plan.status === "confirmado" ? "confirmado" : "rascunho";
+    if (!window.confirm(`Excluir o planejamento ${formatPlanningDate(plan.inicio)} a ${formatPlanningDate(plan.fim)} (${statusLabel}) e todas as revisões e PDFs? Esta ação não pode ser desfeita.`)) return;
+    setDeleting(plan.id); setError(""); setMessage("");
+    try {
+      await deleteWorkPlan(plan.id);
+      setPlans((current) => current.filter((item) => item.id !== plan.id));
+      setMessage(`Planejamento ${formatPlanningDate(plan.inicio)} a ${formatPlanningDate(plan.fim)} excluído, incluindo revisões e PDFs locais.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Falha ao excluir o planejamento.");
+    } finally { setDeleting(""); }
+  }
   return <>
     <Head><title>Acompanhar planejamentos | Centro PCM</title></Head>
     <main className="pcm-workspace mx-auto min-h-screen max-w-[1600px] space-y-5 p-4 lg:p-8">
@@ -38,6 +52,7 @@ export default function FollowUpPage() {
         <select className="rounded-lg border border-white/15 bg-[#081729] p-3 text-sm text-white" aria-label="Status do planejamento" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">Todos os status</option><option value="rascunho">Rascunhos</option><option value="confirmado">Confirmados localmente</option></select>
       </div>
       {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
+      {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
       {loading ? <p role="status" className="text-slate-400">Carregando...</p> : <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {!visible.length && <p className="text-sm text-slate-400">Nenhum planejamento encontrado. Na carteira, defina a equipe e clique em Planejar PM ou Planejar Corretiva.</p>}
         {visible.map((p) => <article key={p.id} className="pcm-panel space-y-3 p-5">
@@ -46,7 +61,13 @@ export default function FollowUpPage() {
           <p className="text-sm text-slate-300">{p.setores.join(" · ")}</p>
           <p className="text-xs text-slate-400">Planejador: {p.planejador}<br />Última revisão: {new Date(p.atualizado_em).toLocaleString("pt-BR")}</p>
           <p className="text-xs text-slate-500">{p.motivo}</p>
-          <Link href={{ pathname: "/planejamento/alocacao", query: { plano: p.id, modo: "revisao" } }} className="pcm-primary-button inline-flex">Abrir cronograma e reprogramar →</Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href={{ pathname: "/planejamento/alocacao", query: { plano: p.id, modo: "revisao" } }} className="pcm-primary-button inline-flex">Abrir cronograma e reprogramar →</Link>
+            <button type="button" aria-label={`Excluir planejamento ${p.inicio} a ${p.fim}`} title="Excluir planejamento e todas as revisões locais"
+              disabled={!!deleting} onClick={() => void removePlan(p)} className="pcm-small-button border-rose-400/40 text-rose-300 hover:bg-rose-400/10 disabled:opacity-50">
+              <Trash2 size={15} /> {deleting === p.id ? "Excluindo..." : "Excluir"}
+            </button>
+          </div>
         </article>)}
       </section>}
     </main>

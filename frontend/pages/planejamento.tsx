@@ -2,6 +2,7 @@ import Head from "next/head";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useState, type FocusEvent, type KeyboardEvent } from "react";
+import { LoaderCircle } from "lucide-react";
 import planningOptions from "@/data/planejamento-opcoes.json";
 import {
   obterSincronizacao,
@@ -21,6 +22,23 @@ const syncStatusLabels: Record<SyncRun["status"], string> = {
 
 function isSyncActive(status: SyncRun["status"]): boolean {
   return status === "queued" || status === "running" || status === "saving";
+}
+
+function synchronizationProgress(run: SyncRun | null): number {
+  if (!run) return 0;
+  if (run.status === "completed") return 100;
+  if (run.status === "saving") return 96;
+  if (run.status === "queued") return 3;
+
+  const stage = run.etapa.toLowerCase();
+  if (stage.includes("autentic") || stage.includes("navegador") || stage.includes("quickrep")) return 12;
+  if (stage.includes("concluido")) return 92;
+  if (stage.includes("filha")) return 88;
+  if (stage.includes("mao_de_obra")) return 92;
+  if (stage.includes("oslc")) {
+    return Math.min(86, 24 + run.pagina_atual * 8);
+  }
+  return 8;
 }
 
 async function watchSynchronization(
@@ -267,7 +285,7 @@ export default function PlanejamentoPage() {
               Continuar planejamento →
             </button>
           )}
-          <p className="w-full text-xs text-slate-400">Consulta novamente as OTs dos setores selecionados, incluindo mão de obra planejada (especialidade, quantidade e horas). Conclua o login/MFA no Firefox se solicitado. Não atualiza o cadastro de funcionários.</p>
+          <p className="w-full text-xs text-slate-400">Consulta novamente as OTs dos setores selecionados, incluindo mão de obra planejada (especialidade, quantidade e horas). O acesso ao BMA ocorre em segundo plano; se exigir MFA ou uma etapa manual, a coleta será interrompida. Não atualiza o cadastro de funcionários.</p>
           {error && <p className="mt-4 text-sm text-rose-300" role="alert">{error}</p>}
         </div>
 
@@ -309,6 +327,35 @@ export default function PlanejamentoPage() {
               ))}
             </ol>
           </section>
+        )}
+        {loading && (
+          <div role="dialog" aria-modal="true" aria-labelledby="sync-progress-title"
+            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4">
+            <section className="w-full max-w-md rounded-lg border border-white/10 bg-navy-900 p-6 shadow-2xl">
+              <div className="flex items-center gap-3">
+                <LoaderCircle size={24} className="animate-spin text-accent-400" aria-hidden="true" />
+                <div>
+                  <h2 id="sync-progress-title" className="text-lg font-semibold text-white">Carregando OTs do BMA</h2>
+                  <p className="mt-1 text-xs text-slate-400">Progresso estimado</p>
+                </div>
+                <span className="ml-auto text-2xl font-semibold tabular-nums text-white">
+                  {Math.round(synchronizationProgress(syncRun))}%
+                </span>
+              </div>
+              <div role="progressbar" aria-label="Progresso estimado da carga de OTs"
+                aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(synchronizationProgress(syncRun))}
+                className="mt-5 h-2 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full bg-accent-400 transition-[width] duration-500"
+                  style={{ width: `${synchronizationProgress(syncRun)}%` }} />
+              </div>
+              <p role="status" aria-live="polite" className="mt-4 text-sm text-slate-300">
+                {syncRun?.mensagem || "Preparando a sincronização com o BMA..."}
+              </p>
+              {syncRun && <p className="mt-2 text-xs text-slate-500">
+                Página {syncRun.pagina_atual} · {syncRun.ots_lidas} OT(s) lidas
+              </p>}
+            </section>
+          </div>
         )}
       </main>
     </>

@@ -9,7 +9,7 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const moduleValue = { exports: {} };
 new Function("module", "exports", compiled)(moduleValue, moduleValue.exports);
-const { periodoValido, horasExecutante, configuracaoInicial, chaveExecutante, equipeDefinida, reutilizarEquipe, formatPlanningDate, parsePlanningDate, diasUteis, configurarDiasDisponiveis } = moduleValue.exports;
+const { periodoValido, horasExecutante, configuracaoInicial, chaveExecutante, equipeDefinida, reutilizarEquipe, formatPlanningDate, parsePlanningDate, diasUteis, configurarDiasDisponiveis, formatPlannerIdentity, searchPlannerPeople, resolvePlannerIdentity } = moduleValue.exports;
 const member = (overrides = {}) => ({
   orgid: "BR", matricula: "TEST", funcao: "210", jornada: "adm",
   inicio_ciclo: null, ajuste_horas: 0, ...overrides,
@@ -62,6 +62,20 @@ test("planning date fields always display dd/mm/yyyy and only emit valid ISO dat
     assert.equal(parsePlanningDate(value), "");
   }
   assert.equal(formatPlanningDate("2026-02-30"), "");
+});
+
+test("planner identity resolves by name or matricula and formats uppercase", () => {
+  const people = [
+    { matricula: "b111132", nome: "Álvaro Souza" },
+    { matricula: "b222233", nome: "Ana Lima" },
+  ];
+  assert.equal(formatPlannerIdentity(people[0]), "B111132 - ÁLVARO SOUZA");
+  assert.equal(resolvePlannerIdentity("b111132", people), "B111132 - ÁLVARO SOUZA");
+  assert.equal(resolvePlannerIdentity("alvaro souza", people), "B111132 - ÁLVARO SOUZA");
+  assert.deepEqual(searchPlannerPeople("lva", people), [people[0]]);
+  assert.equal(resolvePlannerIdentity("b111132", [{ matricula: "", nome: "Cadastro incompleto" }, ...people]), "B111132 - ÁLVARO SOUZA");
+  assert.throws(() => resolvePlannerIdentity("Pessoa desconhecida", people), /não encontrado/);
+  assert.throws(() => resolvePlannerIdentity("Ana Lima", [...people, { matricula: "b333344", nome: "Ana Lima" }]), /ambíguo/);
 });
 
 test("absences remove only scheduled work, override specials and do not double count rest", () => {

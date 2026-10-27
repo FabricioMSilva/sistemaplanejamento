@@ -68,6 +68,15 @@ class PdfLayoutTests(unittest.TestCase):
         import pymupdf
         return pymupdf.open(stream=render_schedule(doc), filetype="pdf")
 
+    def test_schedule_shows_target_finish_as_data_limite(self):
+        doc = example_plan()
+        doc["ordens"][0]["dados"]["targcompdate"] = "2026-11-02T10:00:00-03:00"
+        pdf = self.parse(doc)
+        lines = "\n".join(page.get_text() for page in pdf).splitlines()
+        self.assertIn("Data Limite", lines)
+        self.assertIn("02/11/2026", lines)
+        self.assertNotIn("Programada", lines)
+
     def test_schedule_preserves_saved_sequence_instead_of_sorting_ot_numbers(self):
         doc = example_plan()
         doc["blocos"] = list(reversed(doc["blocos"][:3]))
@@ -83,8 +92,54 @@ class PdfLayoutTests(unittest.TestCase):
         self.assertEqual(summary(doc)["hours"], before)
         pdf = self.parse(doc)
         text = "\n".join(page.get_text() for page in pdf)
-        self.assertIn("OTs posicionadas no rascunho", text)
-        self.assertIn("Sem reserva adicional", text)
+        self.assertNotIn("OTs posicionadas no rascunho", text)
+
+    def test_pdf_summarizes_backlog_with_status_and_pm_type_charts(self):
+        doc = example_plan()
+        doc["requisitos"]["RES:EXEMPLO-260"]["duracao"] = 2
+        doc["ordens"].extend([
+            {"siteid": "RES", "wonum": "BACKLOG-PM", "dados": {
+                "description": "PM1 - backlog", "worktype": "I"}},
+            {"siteid": "RES", "wonum": "BACKLOG-COR", "dados": {
+                "description": "Falha hidráulica", "worktype": "E", "targcompdate": "2026-10-28"}},
+            {"siteid": "RES", "wonum": "BACKLOG-COR-2", "dados": {
+                "description": "Falha elétrica", "worktype": "E", "status": "APPR"}},
+        ])
+        doc["requisitos"].update({
+            "RES:BACKLOG-PM": {"duracao": 2, "observacao": "Não listar"},
+            "RES:BACKLOG-COR": {"duracao": None, "observacao": "Não listar"},
+            "RES:BACKLOG-COR-2": {"duracao": None, "observacao": "Não listar"},
+        })
+        corrective_orders = [order for order in doc["ordens"] if order["dados"].get("worktype") == "E"]
+        for order, status in zip(corrective_orders, ("WPREP", "INPROG", "WSCH", "COMP", "WPREP", "WPREP")):
+            order["status"] = status
+
+        data = summary(doc)
+        self.assertEqual([len(data["groups"][status]) for status in
+                          ("Programadas", "Parciais", "Não alocadas")], [24, 1, 3])
+        self.assertEqual(data["groups_by_type"]["PM1"], {
+            "Programadas": 9, "Parciais": 1, "Não alocadas": 1,
+        })
+        self.assertEqual(data["groups_by_type"]["PM2"]["Programadas"], 5)
+        self.assertEqual(data["corrective_by_status"], {
+            "APPR": 1, "WPREP": 1,
+        })
+        self.assertEqual(len(data["unprogrammed_corrective"]), 2)
+
+        pdf = self.parse(doc)
+        text = "\n".join(page.get_text() for page in pdf)
+        self.assertIn("BACKLOG · OTs TIPO E NÃO ALOCADAS POR STATUS", text)
+        self.assertNotIn("OTs TIPO E NÃO PROGRAMADAS", text)
+        self.assertNotIn("BACKLOG-COR", text)
+        self.assertNotIn("BACKLOG-COR-2", text)
+        self.assertIn("APPR", text)
+        self.assertNotIn("PARETO DE OTs POR STATUS", text)
+        self.assertNotIn("Acumulado", text)
+        self.assertIn("WPREP", text)
+        self.assertIn("PM · QUANTIDADE POR TIPO E STATUS", text)
+        self.assertNotIn("BACKLOG-PM", text)
+        self.assertNotIn("PM · S", text)
+        self.assertNotIn("COR · E", text)
 
     def test_draft_conflicts_are_red_and_explicit_in_pdf(self):
         doc = example_plan()
@@ -95,8 +150,8 @@ class PdfLayoutTests(unittest.TestCase):
         pdf = self.parse(doc)
         text = "\n".join(page.get_text() for page in pdf)
         self.assertIn("PRÉVIA COM SOBRECARGA SEMANAL", text)
-        self.assertIn("Excesso", text)
-        self.assertTrue(any("Excesso" in span["text"] and span["color"] != 0
+        self.assertNotIn("Excesso", text)
+        self.assertTrue(any("PRÉVIA COM SOBRECARGA SEMANAL" in span["text"] and span["color"] != 0
                             for page in pdf for block in page.get_text("dict")["blocks"] if "lines" in block
                             for line in block["lines"] for span in line["spans"]))
 

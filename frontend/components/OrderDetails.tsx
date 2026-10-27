@@ -58,6 +58,13 @@ function displayValue(order: OrdemTrabalho, key: string): string {
   return value;
 }
 
+function dateFieldStyle(key: string): string {
+  if (key === "targstartdate") return "mt-1 inline-block rounded border border-white/70 bg-white/5 px-2 py-1";
+  if (key === "sneconstraint" || key === "fnlconstraint")
+    return "mt-1 inline-block rounded border border-amber-400/80 bg-amber-400/5 px-2 py-1";
+  return "";
+}
+
 function Fields({ order }: { order: OrdemTrabalho }) {
   const labor = plannedLabor(order);
   return (
@@ -75,7 +82,7 @@ function Fields({ order }: { order: OrdemTrabalho }) {
             {group.fields.map(([key, label]) => (
               <div key={key}>
                 <dt className="text-xs text-slate-400">{label}</dt>
-                <dd className="whitespace-normal break-words text-sm text-slate-200">{displayValue(order, key)}</dd>
+                <dd className={`whitespace-normal break-words text-sm text-slate-200 ${dateFieldStyle(key)}`}>{displayValue(order, key)}</dd>
               </div>
             ))}
             <section>

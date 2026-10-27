@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listarMaoDeObra, obterCalendarioTurnos, salvarEquipe, type CalendarioTurnos, type MaoDeObra, type PlanejamentoEquipe } from "@/services/api";
 import {
-  chaveExecutante, configuracaoInicial, configurarDiasDisponiveis, horasExecutante, escalaPeriodo,
+  chaveExecutante, configuracaoInicial, configurarDiasDisponiveis, horasExecutante, resolvePlannerIdentity, escalaPeriodo,
   type ConfiguracaoExecutante, type Profissional,
 } from "@/utils/laborPlanning";
 import { normalize } from "@/utils/orderFilters";
@@ -17,11 +17,12 @@ type Props = {
   onClose: () => void;
   onSave: (plan: PlanejamentoEquipe) => void;
   onLaborUpdate: (data: MaoDeObra) => void;
+  persistTeam?: (plan: PlanejamentoEquipe) => Promise<void>;
 };
 const inputClass = "rounded border border-white/20 bg-navy-950 px-2 py-1.5 text-sm text-white";
 const buttonClass = "rounded border border-white/20 px-3 py-2 text-sm text-accent-400 disabled:cursor-not-allowed disabled:opacity-40";
 
-export default function LaborPlanningModal({ inicio, fim, setores, saved, onClose, onSave, onLaborUpdate }: Props) {
+export default function LaborPlanningModal({ inicio, fim, setores, saved, onClose, onSave, onLaborUpdate, persistTeam }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [data, setData] = useState<MaoDeObra | null>(null);
   const [calendar, setCalendar] = useState<CalendarioTurnos | null>(null);
@@ -128,9 +129,9 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
   }
   const totalHours = [...summary.values()].reduce((sum, row) => sum + row.hours, 0);
 
-  function currentPlan(): PlanejamentoEquipe {
+  function currentPlan(planner = resolvePlannerIdentity(planejador, data?.profissionais ?? [])): PlanejamentoEquipe {
     return {
-      setores, inicio, fim, planejador: planejador.trim(),
+      setores, inicio, fim, planejador: planner,
       executantes: available.map((person) => {
         if (!person.jornada) throw new Error("Jornada não configurada.");
         return {
@@ -155,9 +156,12 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
     setSaving(true);
     setError("");
     try {
-      const plan = currentPlan();
-      await salvarEquipe(plan);
-      localStorage.setItem("pcm-planejador", planejador.trim());
+      const canonicalPlanner = resolvePlannerIdentity(planejador, data?.profissionais ?? []);
+      const plan = currentPlan(canonicalPlanner);
+      if (persistTeam) await persistTeam(plan);
+      else await salvarEquipe(plan);
+      setPlanejador(canonicalPlanner);
+      localStorage.setItem("pcm-planejador", canonicalPlanner);
       onSave(plan);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao salvar a equipe.");
@@ -172,12 +176,13 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
       className="max-h-[94vh] w-[96vw] max-w-7xl overflow-y-auto rounded-xl border border-white/20 bg-navy-900 p-5 text-slate-200 backdrop:bg-black/70">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 id="labor-modal-title" className="text-xl font-semibold text-white">Definir mão de obra disponível</h2>
+          <h2 id="labor-modal-title" className="text-xl font-semibold text-white">{persistTeam ? "Editar mão de obra deste planejamento" : "Definir mão de obra disponível"}</h2>
           <p className="mt-1 text-sm">Período: {inicio.split("-").reverse().join("/")} a {fim.split("-").reverse().join("/")} (inclusive).</p>
         </div>
         <button type="button" onClick={onClose} disabled={saving || toolsBusy} className={buttonClass}>Cancelar</button>
       </div>
       <LaborPlanningTools setores={setores} planejador={planejador} setPlanejador={setPlanejador}
+        profissionais={data?.profissionais ?? []}
         plan={currentPlan} valid={!loading && !pending.length && available.length > 0}
         disabled={saving || loading} onApply={(plan) => {
           setAvailable(reutilizarEquipe(plan, inicio, fim).map((member) => configurarDiasDisponiveis(member, inicio, fim)));
@@ -332,7 +337,7 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
           {!planejador.trim() && <p className="mb-3 text-sm text-amber-200">Informe o planejador para salvar e identificar este planejamento.</p>}
           <button type="button" disabled={saving || toolsBusy || pending.length > 0 || !planejador.trim() || (data.verificacao_nf?.necessaria && !data.verificacao_nf.verificada)}
             onClick={save} className="rounded bg-accent-400 px-4 py-2 font-semibold text-navy-950 disabled:opacity-40">
-            {saving ? "Salvando..." : "Salvar período e equipe"}
+            {saving ? "Salvando..." : persistTeam ? "Atualizar equipe deste planejamento" : "Salvar período e equipe"}
           </button>
         </>
       )}

@@ -71,7 +71,7 @@ Documentação: http://localhost:8000/docs
 
 ### Integração Selenium com o BMA
 
-O endpoint de planejamento abre uma janela visível do Firefox no **Relatório rápido**. No primeiro uso, conclua o login/MFA manualmente nessa janela. O perfil fica em `%LOCALAPPDATA%\BMA_Intranet\FirefoxProfile` para reutilizar a sessão em consultas futuras; senha e MFA não são lidos nem armazenados pelo aplicativo.
+O endpoint de planejamento abre o Firefox em segundo plano no **Relatório rápido** e aciona automaticamente o botão principal de login. O perfil fica em `%LOCALAPPDATA%\BMA_Automacao\FirefoxProfile` para reutilizar a sessão autorizada. Se o BMA exigir autenticação interativa ou MFA, a coleta será interrompida com um erro; senha e MFA não são lidos nem armazenados pelo aplicativo, e a autenticação não é contornada.
 
 Instale as dependências no ambiente do backend e inicie-o:
 
