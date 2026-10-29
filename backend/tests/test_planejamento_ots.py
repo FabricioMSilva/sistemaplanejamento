@@ -64,6 +64,8 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
                 "maintenanceshop": "RES-TC-NF",
                 "description": "Inspeção preventiva",
                 "customfield": "preservado",
+                "lead": {"value": "B114376"},
+                "schedstart": {"value": "2026-10-28T08:00:00-03:00"},
                 "sneconstraint": "2026-10-31T23:00:00-04:00",
                 "children": [{"wonum": "RES1004", "parent": "1001", "istask": True}],
                 "wplabor": [{"craft": "270", "quantity": 1, "laborhrs": 40, "orgid": "BR"}],
@@ -74,6 +76,7 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
                 "status": "WAPPR",
                 "maintenanceshop": "RES-TC-NF",
                 "description": "Reparo",
+                "lead": "B114377",
             },
             {
                 "siteid": "RES",
@@ -96,6 +99,16 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
         self.assertEqual(planned_orders[0]["dados"]["sneconstraint"], "2026-10-31T23:00:00-04:00")
         self.assertEqual(planned_orders[0]["dados"]["children"][0]["wonum"], "RES1004")
         self.assertEqual(planned_orders[0]["dados"]["wplabor"], records[0]["wplabor"])
+        self.assertEqual(planned_orders[0]["lead"], "B114376")
+        self.assertEqual(planned_orders[0]["schedstart"], "2026-10-28T08:00:00-03:00")
+        self.assertEqual(planned_orders[0]["planning_status"], "Planejada")
+        self.assertEqual(all_orders[1]["planning_status"], "Parcial")
+        self.assertEqual(all_orders[2]["planning_status"], "Não verificada")
+        with database.get_connection() as conn:
+            generated = {row["name"] for row in conn.execute("PRAGMA table_xinfo(ordens_trabalho)") if row["hidden"] == 2}
+            indexes = {row["name"] for row in conn.execute("PRAGMA index_list(ordens_trabalho)")}
+        self.assertTrue({"lead", "schedstart", "planning_status"}.issubset(generated))
+        self.assertTrue({"idx_ordens_planejamento_status", "idx_ordens_inicio_planejado"}.issubset(indexes))
 
         records[0]["status"] = "INPRG"
         database.upsert_ordens_trabalho(records[:1], ["RES-TC-NF"])
@@ -118,20 +131,48 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             database.upsert_ordens_trabalho([record], ["RES-TC-NF"])
 
+    def test_daily_snapshot_keeps_one_latest_record_per_order(self):
+        record = {
+            "siteid": "RES",
+            "wonum": "3001",
+            "status": "WAPPR",
+            "maintenanceshop": "RES-TC-NF",
+            "description": "Primeira leitura",
+            "customfield": {"value": "preservado"},
+        }
+        database.upsert_ordens_trabalho([record], ["RES-TC-NF"])
+        record["description"] = "Leitura atualizada"
+        database.upsert_ordens_trabalho([record], ["RES-TC-NF"])
+
+        with database.get_connection() as conn:
+            snapshots = conn.execute(
+                "SELECT snapshot_date, dados_json FROM ordens_trabalho_snapshots "
+                "WHERE siteid = ? AND wonum = ?",
+                ("RES", "3001"),
+            ).fetchall()
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(len(snapshots[0]["snapshot_date"]), 10)
+        self.assertEqual(json.loads(snapshots[0]["dados_json"])["description"], "Leitura atualizada")
+        self.assertEqual(
+            json.loads(snapshots[0]["dados_json"])["customfield"],
+            {"value": "preservado"},
+        )
+
 
 class BMAOSLCTests(unittest.TestCase):
     def test_select_includes_preparation_fields_without_wildcard(self):
         query = parse_qs(urlparse(BMAService._initial_query_url(["RES-TC-NF"])).query)
         fields = set(query["oslc.select"][0].split(","))
         self.assertTrue({
-            "description_longdescription", "sneconstraint", "fnlconstraint",
+            "description_longdescription", "sneconstraint", "fnlconstraint", "lead",
             "pmduedate", "pmnextduedate", "pmnum", "jpnum", "route", "crew",
             "parent", "haschildren", "estlabhrs", "estdur", "istask",
         }.issubset(fields))
         self.assertNotIn("*", fields)
         self.assertIn("wplabor{wplaborid,craft,orgid,quantity,laborhrs,skilllevel}", query["oslc.select"][0])
 
-    def test_wait_for_quickrep_clicks_primary_login_button_in_background(self):
+    def test_wait_for_work_tracking_clicks_primary_login_button_in_background(self):
         service = BMAService()
         driver = unittest.mock.Mock()
         driver.current_url = "https://auth.rbmanca4.rosa-maximo-prod.aws.michelin.com/login/#/form"
@@ -141,10 +182,10 @@ class BMAOSLCTests(unittest.TestCase):
 
         with (
             patch("backend.services.BMAService.WebDriverWait", return_value=wait),
-            patch.object(service, "_find_quick_search", side_effect=[False, True]),
+            patch.object(service, "_find_work_tracking_search", side_effect=[False, True]),
             patch.object(service, "_find_login_button", return_value=login_button),
         ):
-            service._wait_for_quickrep(driver)
+            service._wait_for_work_tracking(driver)
 
         login_button.click.assert_called_once_with()
 
@@ -214,7 +255,7 @@ class BMAOSLCTests(unittest.TestCase):
         child = {"siteid": "RES", "wonum": "RES2", "parent": "RES1", "istask": True}
         with (
             patch.object(service, "_create_browser") as browser,
-            patch.object(service, "_wait_for_quickrep"),
+            patch.object(service, "_wait_for_work_tracking"),
             patch.object(service, "_fetch_payload", side_effect=[
                 {"member": [record]}, {"member": [child]},
             ]),
@@ -237,7 +278,7 @@ class BMAOSLCTests(unittest.TestCase):
             self.assertIn(f'status!="{status}"', where)
         self.assertNotIn("(", where)
 
-    def test_opens_quickrep_and_fetches_all_pages_within_the_authenticated_browser(self):
+    def test_opens_work_tracking_and_fetches_all_pages_within_the_authenticated_browser(self):
         driver = unittest.mock.Mock()
         driver.execute_async_script = unittest.mock.Mock()
         pages = [
@@ -270,7 +311,7 @@ class BMAOSLCTests(unittest.TestCase):
 
         with (
             patch.object(service, "_create_browser", return_value=driver) as create_browser,
-            patch.object(service, "_wait_for_quickrep") as wait_for_quickrep,
+            patch.object(service, "_wait_for_work_tracking") as wait_for_work_tracking,
             patch.object(service, "_fetch_payload", side_effect=pages) as fetch_page,
         ):
             records = service.listar_ots_por_setor([
@@ -281,8 +322,8 @@ class BMAOSLCTests(unittest.TestCase):
 
         self.assertEqual([record["wonum"] for record in records], ["RES1001", "RES1002"])
         create_browser.assert_called_once_with(headless=True)
-        driver.get.assert_called_once_with(service.quickrep_url)
-        wait_for_quickrep.assert_called_once_with(driver, None)
+        driver.get.assert_called_once_with(service.wotrack_url)
+        wait_for_work_tracking.assert_called_once_with(driver, None)
         first_url = fetch_page.call_args_list[0].args[1]
         query = parse_qs(urlparse(first_url).query)
         self.assertIn('"RES-TC-NF"', query["oslc.where"][0])
@@ -323,7 +364,7 @@ class BMAOSLCTests(unittest.TestCase):
 
     def test_rejects_pagination_to_another_origin(self):
         service = BMAService()
-        origin = urlparse(service.quickrep_url)
+        origin = urlparse(service.wotrack_url)
         with self.assertRaises(BMAServiceError):
             service._normalize_next_page(
                 "/maximo/oslc/os/mxwo?cursor=1",

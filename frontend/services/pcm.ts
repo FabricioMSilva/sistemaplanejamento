@@ -29,11 +29,23 @@ export type PlanSummary = Pick<WorkPlan, "id" | "revisao" | "status" | "inicio" 
 export type PlanRevision = { revisao: number; salvo_em: string; motivo: string };
 export type PlanChange = Pick<WorkPlan, "revisao" | "requisitos" | "blocos" | "indisponibilidades" | "posicionamentos"> & { motivo: string; confirmar: boolean; atualizar_especialidades?: boolean };
 export type BmaPageField = { tag: string; id: string; name: string; label: string; type: string; disabled: boolean; frame?: string };
+export type BmaPlanningResult = {
+  numero_ot: string; descricao: string; tipo_ordem: string; status: string; equipamento: string;
+  localizacao: string; data_planejada: string; inicio_planejado: string; termino_planejado: string;
+  janela_execucao: string; dia_execucao: string; executor: string; equipe_responsavel: string;
+  duracao_planejada: string; prioridade: string; dados_adicionais: Record<string, unknown>;
+  situacao_consulta: "sucesso" | "planejada" | "ja_planejada" | "pendente_planejador" | "nao_encontrada" | "erro"; erro: string | null;
+};
 export type BmaPageMonitor = {
-  monitor_id: string; status: "starting" | "monitoring" | "stopping" | "stopped" | "failed";
+  monitor_id: string; status: "starting" | "monitoring" | "stopping" | "stopped" | "completed" | "failed";
   message: string; fields: BmaPageField[]; elapsed_seconds?: number;
+  mode?: "search_only" | "open_order" | "planning_read" | "planning_send" | "open_ot" | "observe"; inspection_only?: boolean;
+  progress?: number;
   stage?: string; selected_wonums?: string[]; opened_wonum?: string | null;
+  queue_total?: number; current_order_index?: number; current_wonum?: string | null;
+  completed_wonums?: string[]; failed_wonum?: string | null;
   page_url?: string; page_title?: string;
+  processadas?: number; planejadas?: number; pendentes?: number; com_erro?: number; resultados?: BmaPlanningResult[];
 };
 export type BmaOrderPlan = {
   siteid: string; wonum: string; planned_start: string; planned_finish: string; specialty: string;
@@ -63,6 +75,13 @@ export const getRevisions = (id: string) => request<PlanRevision[]>(`/planos/${i
 export const refreshPlanSpecialties = (id: string, change: PlanChange) =>
   request<{ plano: WorkPlan; atualizadas: number }>(`/planos/${id}/especialidades`, "POST", change);
 export const startBmaPageMonitor = (orders: BmaOrderPlan[]) => request<{ monitor_id: string }>("/bma-page-monitor", "POST", { orders });
+export const startBmaPageSearch = (wonum: string) => request<{ monitor_id: string }>("/bma-page-monitor/search", "POST", { wonum });
+export const startBmaPageOpenOrder = (wonum: string) => request<{ monitor_id: string }>("/bma-page-monitor/open-order", "POST", { wonum });
+export const sendPlanningToBmaReader = (planId: string) =>
+  request<{ monitor_id: string; total: number }>(`/planos/${encodeURIComponent(planId)}/enviar-planejamento`, "POST");
+export type BmaSendStatus = { numero_ot: string; situacao: BmaPlanningResult["situacao_consulta"]; registrado_em: string; erro: string | null };
+export const getBmaSendStatus = (planId: string) => request<BmaSendStatus[]>(`/planos/${encodeURIComponent(planId)}/envios-bma`);
+export const openOrderInBma = (wonum: string) => request<{ monitor_id: string }>("/bma-page-monitor/abrir-ot", "POST", { wonum });
 export const getBmaPageMonitor = (id: string) => request<BmaPageMonitor>(`/bma-page-monitor/${encodeURIComponent(id)}`);
 export const stopBmaPageMonitor = (id: string) => request<BmaPageMonitor>(`/bma-page-monitor/${encodeURIComponent(id)}`, "DELETE");
 

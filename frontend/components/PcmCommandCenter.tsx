@@ -6,7 +6,7 @@ import {
   Play, ShieldCheck, Sparkles, UsersRound, Wrench,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { OrdemTrabalho, PlanejamentoEquipe } from "@/services/api";
+import type { CalendarioTurnos, OrdemTrabalho, PlanejamentoEquipe } from "@/services/api";
 import type { PcmData } from "@/utils/pcmDashboard";
 import { formatNumber } from "@/utils/pcmDashboard";
 import { PcmCharts, PcmTemporal } from "@/components/PcmVisualizations";
@@ -14,12 +14,13 @@ import PlanningDateInput from "@/components/PlanningDateInput";
 
 type Props = {
   data: PcmData; orders: OrdemTrabalho[]; inicio: string; fim: string;
+  calendario: CalendarioTurnos | null;
   setInicio: (value: string) => void; setFim: (value: string) => void;
   canPlan: boolean; canDefineTeam: boolean; teamLoading: boolean; teamError: string;
   loading: boolean; savedTeam: PlanejamentoEquipe | null;
   mode: "pm" | "corretiva"; onMode: (mode: "pm" | "corretiva") => void;
   onTeam: () => void; dataError: string;
-  onPlan: (mode: "pm" | "corretiva" | "revisao") => void;
+  onPlan: (mode: "pm" | "corretiva") => void;
   onExport: (mode: "pm" | "corretiva") => void;
   busy: boolean;
 };
@@ -33,6 +34,9 @@ const inputClass = "h-11 w-full min-w-0 rounded-lg border border-white/15 bg-[#0
 
 export default function PcmCommandCenter(props: Props) {
   const { data, orders, inicio, fim, canPlan, canDefineTeam, loading } = props;
+  const equipes = [...new Set((props.savedTeam?.executantes ?? [])
+    .filter((member) => member.jornada === "equipe" && member.equipe)
+    .map((member) => member.equipe as number))];
   const [step, setStep] = useState(0);
   const [scenario, setScenario] = useState(100);
   const [personSearch, setPersonSearch] = useState("");
@@ -140,10 +144,10 @@ export default function PcmCommandCenter(props: Props) {
             <h2 className="pcm-title"><CalendarDays size={17} /> 01 · Horizonte de execução</h2>
             <div className="mt-4 grid grid-cols-2 gap-3">
               <label className="min-w-0 text-xs text-slate-400">Início do planejamento
-                <PlanningDateInput aria-label="Início do planejamento" value={inicio} disabled={props.teamLoading || !!props.teamError} onChange={props.setInicio} className={`${inputClass} mt-2`} />
+                <PlanningDateInput aria-label="Início do planejamento" value={inicio} calendario={props.calendario} equipes={equipes} disabled={props.teamLoading || !!props.teamError} onChange={props.setInicio} className={`${inputClass} mt-2`} />
               </label>
               <label className="min-w-0 text-xs text-slate-400">Fim do planejamento
-                <PlanningDateInput aria-label="Fim do planejamento" value={fim} min={inicio || undefined} disabled={props.teamLoading || !!props.teamError} onChange={props.setFim} className={`${inputClass} mt-2`} />
+                <PlanningDateInput aria-label="Fim do planejamento" value={fim} min={inicio || undefined} calendario={props.calendario} equipes={equipes} disabled={props.teamLoading || !!props.teamError} onChange={props.setFim} className={`${inputClass} mt-2`} />
               </label>
             </div>
           </div>
@@ -168,7 +172,7 @@ export default function PcmCommandCenter(props: Props) {
           </p>
           <p className="mt-1 text-xs leading-relaxed text-slate-400">
             O período inclui OTs cuja data-alvo de início/término ou início/término programado esteja no intervalo, além de ordens cujo intervalo de datas atravesse o horizonte.
-            Essa restrição de datas vale para a preventiva. A corretiva é uma carteira aberta: inclui todas as OTs tipo E dos setores selecionados, com ou sem data-alvo.
+            Essa restrição de datas vale para a preventiva. A corretiva é uma carteira aberta: inclui as OTs tipo E dos setores selecionados com status PREPARED e Início planejado em branco, ou com status WFSCH/WSCH.
           </p>
         </> : <p className="text-sm text-amber-200">Informe um período de início e término válido para selecionar as OTs que serão consideradas no planejamento.</p>}
       </section>
@@ -210,7 +214,7 @@ export default function PcmCommandCenter(props: Props) {
                 </div>
                 <div className="mb-4 space-y-1 border-t border-white/5 pt-3 text-[11px] text-slate-500">
                   <p>{item.mode === "pm" ? "Criticidade: não coletada · descrição deve começar por PM" : "Carteira aberta completa · sem filtro de data-alvo"}</p>
-                  {item.mode === "pm" && <p>PM1 Segurança · PM2 Qualidade · PM3 Manutenção · {data.pmExcluded} OT(s) I/S excluída(s): descrição fora do padrão</p>}
+                  {item.mode === "pm" && <p>PM1 Segurança · PM2 Qualidade · PM3 Manutenção · {data.pmExcluded} OT(s) I/S fora do padrão · {data.pmAlreadyPlannedExcluded} planejada(s)/parcial(is) · {data.pmUnverifiedExcluded} sem verificação</p>}
                   <p>{item.portfolio.missingHours} OTs sem HH · {item.portfolio.missingAssets} sem equipamento informado</p>
                 </div>
                 <div className="mb-3 flex flex-wrap gap-2">
@@ -226,7 +230,6 @@ export default function PcmCommandCenter(props: Props) {
               </article>;
             })}
           </section>
-          <button type="button" disabled={!canPlan || props.busy} onClick={() => props.onPlan("revisao")} className="pcm-primary-button w-full"><ClipboardCheck size={17} /> Revisar e confirmar planejamento integrado</button>
           <PcmTemporal data={data} inicio={inicio} fim={fim} />
           <PcmCharts data={data} />
           <section className="pcm-panel overflow-hidden" id="pcm-team">

@@ -5,7 +5,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from selenium.common.exceptions import WebDriverException
-from api.pcm import BmaOrderPlanRequest, BmaPageMonitorRequest
+from selenium.webdriver.common.keys import Keys
+from api.pcm import (
+    BmaOrderPlanRequest, BmaPageMonitorRequest, BmaPageSearchRequest,
+)
 from services.BMAService import BMAService, BMAServiceError
 from services.bma_page_monitor import BmaPageMonitor, WOTRACK_URL
 
@@ -22,6 +25,89 @@ def planned_order(wonum):
 
 
 class BmaPageMonitorTests(unittest.TestCase):
+    def test_read_only_search_submits_number_without_opening_or_editing_order(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_search("RES6707859")
+
+        monitor_id = result["monitor_id"]
+        session = monitor._sessions[monitor_id]
+        driver = Mock()
+        driver.current_url = "https://maximo.example/wotrack#/main"
+        driver.title = "Rastrear Ordem de Trabalho"
+        driver_service = Mock(timeout=30)
+        driver_service._create_browser.return_value = driver
+        order_filter = Mock()
+        order_filter.send_keys.side_effect = lambda *args: session["stop"].set()
+        fields = [{"tag": "input", "id": "quicksearch", "label": "Find Ordem de Trabalho"}]
+
+        with patch("services.bma_page_monitor.BMAService", return_value=driver_service), \
+             patch.object(monitor, "_visible_fields", return_value=fields), \
+             patch.object(monitor, "_find_order_filter", return_value=order_filter), \
+             patch.object(monitor, "_find_order_link") as find_order_link, \
+             patch.object(monitor, "_process_order_queue") as process_order_queue, \
+             patch("services.bma_page_monitor.sleep"):
+            monitor._run_search_only(monitor_id, "RES6707859")
+
+        self.assertEqual(thread.call_args.kwargs["target"], monitor._run_search_only)
+        self.assertEqual(thread.call_args.kwargs["args"], (monitor_id, "RES6707859"))
+        self.assertEqual(
+            [call.args for call in order_filter.send_keys.call_args_list],
+            [(Keys.CONTROL, "a"), ("RES6707859", Keys.ENTER)],
+        )
+        driver_service.clear_browser_cache_and_history.assert_not_called()
+        find_order_link.assert_not_called()
+        process_order_queue.assert_not_called()
+        self.assertTrue(monitor.get(monitor_id)["inspection_only"])
+        self.assertEqual(monitor.get(monitor_id)["mode"], "search_only")
+        driver.quit.assert_called_once_with()
+
+    def test_read_only_search_rejects_invalid_order_number(self):
+        with self.assertRaises(BMAServiceError):
+            BmaPageMonitor().start_search("RES 6707859")
+
+    def test_open_order_starts_dedicated_read_only_worker(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_open_order("res6707859")
+
+        state = monitor.get(result["monitor_id"])
+        self.assertEqual(state["mode"], "open_order")
+        self.assertTrue(state["inspection_only"])
+        self.assertEqual(state["selected_wonums"], ["RES6707859"])
+        self.assertEqual(thread.call_args.kwargs["target"], monitor._run_open_order_only)
+
+    def test_open_order_opens_result_without_processing_or_saving(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread"):
+            monitor_id = monitor.start_open_order("RES6707859")["monitor_id"]
+        session = monitor._sessions[monitor_id]
+        driver = Mock()
+        driver.current_url = "https://maximo.example/wotrack#/main"
+        driver.title = "Rastrear Ordem de Trabalho"
+        service = Mock(timeout=30)
+        service._create_browser.return_value = driver
+        order_filter = Mock()
+
+        def open_order(*_args):
+            session["stop"].set()
+
+        with (
+            patch("services.bma_page_monitor.BMAService", return_value=service),
+            patch.object(monitor, "_visible_fields", return_value=[{"tag": "input", "id": "quicksearch"}]),
+            patch.object(monitor, "_find_order_filter", return_value=order_filter),
+            patch.object(monitor, "_open_order_result_in_maximo", side_effect=open_order) as open_result,
+            patch.object(monitor, "_process_order_queue") as process_queue,
+            patch("services.bma_page_monitor.sleep"),
+        ):
+            monitor._run_open_order_only(monitor_id, "RES6707859")
+
+        open_result.assert_called_once_with(monitor_id, driver, "RES6707859")
+        process_queue.assert_not_called()
+        self.assertEqual(monitor.get(monitor_id)["progress"], 100)
+        self.assertEqual(monitor.get(monitor_id)["opened_wonum"], "RES6707859")
+        driver.quit.assert_called_once_with()
+
     def test_browser_cache_cleanup_removes_history_cookies_and_site_storage(self):
         with tempfile.TemporaryDirectory() as local_app_data:
             profile = Path(local_app_data) / "BMA_Automacao" / "FirefoxProfile"
@@ -64,9 +150,40 @@ class BmaPageMonitorTests(unittest.TestCase):
         with self.assertRaises(BMAServiceError):
             BmaPageMonitor().start([planned_order("RES6780264,RES67802192")])
 
-    def test_monitor_rejects_multiple_orders_in_one_session(self):
-        with self.assertRaisesRegex(BMAServiceError, "uma OT por vez"):
-            BmaPageMonitor().start([planned_order("RES6780264"), planned_order("RES67802192")])
+    def test_monitor_accepts_multiple_orders_in_one_session(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread"):
+            result = monitor.start([planned_order("RES6780264"), planned_order("RES67802192")])
+
+        self.assertEqual(monitor.get(result["monitor_id"])["selected_wonums"], [
+            "RES6780264", "RES67802192",
+        ])
+
+    def test_queue_verifies_each_order_before_opening_the_next(self):
+        monitor = BmaPageMonitor()
+        orders = [planned_order("RES6780264"), planned_order("RES67802192")]
+        with patch("services.bma_page_monitor.Thread"):
+            monitor_id = monitor.start(orders)["monitor_id"]
+        events = []
+
+        with (
+            patch.object(monitor, "_open_order_in_maximo",
+                         side_effect=lambda _monitor_id, _driver, wonum: events.append(("open", wonum))),
+            patch.object(monitor, "_fill_general_dates",
+                         side_effect=lambda _monitor_id, _driver, order: events.append(("dates", order["wonum"]))),
+            patch.object(monitor, "_fill_assignments",
+                         side_effect=lambda _monitor_id, _driver, order: events.append(("assignments", order["wonum"]))),
+            patch.object(monitor, "_verify_saved_order",
+                         side_effect=lambda _monitor_id, _driver, order: events.append(("verified", order["wonum"]))),
+        ):
+            self.assertTrue(monitor._process_order_queue(monitor_id, Mock(), orders))
+
+        self.assertEqual(events, [
+            ("dates", "RES6780264"), ("assignments", "RES6780264"), ("verified", "RES6780264"),
+            ("open", "RES67802192"), ("dates", "RES67802192"),
+            ("assignments", "RES67802192"), ("verified", "RES67802192"),
+        ])
+        self.assertEqual(monitor.get(monitor_id)["completed_wonums"], ["RES6780264", "RES67802192"])
 
     def test_monitor_accepts_valid_labor_when_bma_will_resolve_specialty_from_registration(self):
         order = planned_order("RES6780264")
@@ -81,9 +198,12 @@ class BmaPageMonitorTests(unittest.TestCase):
         order["specialty"] = ""
         self.assertEqual(BmaOrderPlanRequest(**order).specialty, "")
 
-    def test_api_request_rejects_multiple_orders(self):
-        with self.assertRaises(ValueError):
-            BmaPageMonitorRequest(orders=[planned_order("RES6780264"), planned_order("RES67802192")])
+    def test_api_request_accepts_multiple_orders(self):
+        request = BmaPageMonitorRequest(orders=[
+            planned_order("RES6780264"), planned_order("RES67802192"),
+        ])
+
+        self.assertEqual(len(request.orders), 2)
 
     def test_order_filter_is_found_by_accessible_column_label(self):
         monitor = BmaPageMonitor()
@@ -99,6 +219,7 @@ class BmaPageMonitorTests(unittest.TestCase):
     def test_order_filter_accepts_work_order_tracking_quicksearch(self):
         monitor = BmaPageMonitor()
         quicksearch = Mock(id="quicksearch")
+        quicksearch.get_attribute.return_value = "quicksearch"
         quicksearch.is_displayed.return_value = True
         quicksearch.is_enabled.return_value = True
         driver = Mock()
@@ -107,10 +228,46 @@ class BmaPageMonitorTests(unittest.TestCase):
 
         self.assertIs(monitor._find_order_filter(driver), quicksearch)
 
+    def test_order_filter_matches_dom_id_not_selenium_remote_id(self):
+        quicksearch = Mock(id="selenium-remote-element-id")
+        quicksearch.get_attribute.return_value = "quicksearch"
+        quicksearch.is_displayed.return_value = True
+        quicksearch.is_enabled.return_value = True
+        driver = Mock()
+        driver.find_elements.side_effect = [[quicksearch], [], []]
+
+        self.assertIs(BmaPageMonitor._find_order_filter(driver), quicksearch)
+        driver.execute_script.assert_not_called()
+
+    def test_order_filter_keeps_frame_context_when_quicksearch_is_inside_iframe(self):
+        frame = object()
+        quicksearch = Mock(id="quicksearch")
+        quicksearch.get_attribute.return_value = "quicksearch"
+        quicksearch.is_displayed.return_value = True
+        quicksearch.is_enabled.return_value = True
+        context = ["root"]
+        driver = Mock()
+        driver.switch_to.frame.side_effect = lambda _frame: context.__setitem__(0, "iframe")
+        driver.switch_to.parent_frame.side_effect = lambda: context.__setitem__(0, "root")
+
+        def find_elements(_by, selector):
+            if selector == "iframe":
+                return [frame] if context[0] == "root" else []
+            if selector == "quicksearch":
+                return [quicksearch] if context[0] == "iframe" else []
+            return []
+
+        driver.find_elements.side_effect = find_elements
+
+        self.assertIs(BmaPageMonitor._find_order_filter(driver), quicksearch)
+        self.assertEqual(context[0], "iframe")
+
     def test_order_filter_prefers_global_quicksearch_over_grid_column(self):
         monitor = BmaPageMonitor()
         global_find = Mock(id="quicksearch")
         column_filter = Mock(id="column-filter")
+        global_find.get_attribute.return_value = "quicksearch"
+        column_filter.get_attribute.return_value = "column-filter"
         global_find.is_displayed.return_value = True
         global_find.is_enabled.return_value = True
         column_filter.is_displayed.return_value = True
@@ -127,7 +284,70 @@ class BmaPageMonitorTests(unittest.TestCase):
         driver.find_elements.side_effect = find_elements
 
         self.assertIs(monitor._find_order_filter(driver), global_find)
-        self.assertEqual(driver.find_elements.call_args_list[0].args[1], "quicksearch")
+
+    def test_order_filter_does_not_fall_back_to_grid_when_quicksearch_is_disabled(self):
+        quicksearch = Mock(id="quicksearch")
+        quicksearch.get_attribute.return_value = "quicksearch"
+        quicksearch.is_displayed.return_value = True
+        quicksearch.is_enabled.return_value = False
+        column_filter = Mock(id="column-filter")
+        column_filter.get_attribute.return_value = "column-filter"
+        column_filter.is_displayed.return_value = True
+        column_filter.is_enabled.return_value = True
+        driver = Mock()
+
+        def find_elements(_by, selector):
+            if selector == "quicksearch":
+                return [quicksearch]
+            if selector == "input.tablefilterfield":
+                return [column_filter]
+            return []
+
+        driver.find_elements.side_effect = find_elements
+
+        self.assertIsNone(BmaPageMonitor._find_order_filter(driver))
+        driver.execute_script.assert_not_called()
+
+    def test_open_order_skips_result_link_when_quicksearch_opens_the_order(self):
+        monitor = BmaPageMonitor()
+        order_filter = Mock()
+        driver = Mock()
+
+        def wait_for_condition(_monitor_id, predicate, *_args, **_kwargs):
+            return predicate()
+
+        with (
+            patch.object(monitor, "_find_order_filter", return_value=order_filter),
+            patch.object(monitor, "_switch_to_manage_frame"),
+            patch.object(monitor, "_current_order_number", return_value="RES6780264"),
+            patch.object(monitor, "_find_order_link") as find_order_link,
+            patch.object(monitor, "_wait_until", side_effect=wait_for_condition),
+            patch.object(monitor, "_wait_for_order") as wait_for_order,
+        ):
+            monitor._open_order_in_maximo("monitor", driver, "RES6780264")
+
+        find_order_link.assert_not_called()
+        wait_for_order.assert_not_called()
+        order_filter.click.assert_called_once_with()
+        self.assertEqual(
+            [call.args for call in order_filter.send_keys.call_args_list],
+            [(Keys.CONTROL, "a"), ("RES6780264", Keys.ENTER)],
+        )
+
+    def test_current_order_number_is_found_inside_nested_iframe(self):
+        monitor = BmaPageMonitor()
+        frame = object()
+        context = ["root"]
+        driver = Mock()
+        driver.switch_to.frame.side_effect = lambda _frame: context.__setitem__(0, "iframe")
+        driver.switch_to.parent_frame.side_effect = lambda: context.__setitem__(0, "root")
+        driver.find_elements.side_effect = lambda _by, selector: [frame] if selector == "iframe" and context[0] == "root" else []
+
+        with patch.object(monitor, "_current_order_number",
+                          side_effect=lambda _driver: "RES6780264" if context[0] == "iframe" else ""):
+            self.assertEqual(monitor._current_order_number_in_frames(driver), "RES6780264")
+
+        self.assertEqual(context[0], "root")
 
     def test_order_link_is_found_by_exact_ot_number(self):
         monitor = BmaPageMonitor()
@@ -139,6 +359,28 @@ class BmaPageMonitorTests(unittest.TestCase):
 
         self.assertIs(monitor._find_order_link(driver, "RES6780264"), order_link)
         self.assertIn("normalize-space(.)='RES6780264'", driver.find_elements.call_args.args[1])
+
+    def test_order_link_keeps_frame_context_when_match_is_inside_iframe(self):
+        frame = object()
+        order_link = Mock()
+        order_link.is_displayed.return_value = True
+        order_link.is_enabled.return_value = True
+        context = ["root"]
+        driver = Mock()
+        driver.switch_to.frame.side_effect = lambda _frame: context.__setitem__(0, "iframe")
+        driver.switch_to.parent_frame.side_effect = lambda: context.__setitem__(0, "root")
+
+        def find_elements(_by, selector):
+            if selector == "iframe":
+                return [frame] if context[0] == "root" else []
+            if "normalize-space(.)='RES6780264'" in selector and context[0] == "iframe":
+                return [order_link]
+            return []
+
+        driver.find_elements.side_effect = find_elements
+
+        self.assertIs(BmaPageMonitor._find_order_link(driver, "RES6780264"), order_link)
+        self.assertEqual(context[0], "iframe")
 
     def test_single_selected_order_is_clicked_after_filter_submission(self):
         monitor = BmaPageMonitor()
@@ -158,11 +400,17 @@ class BmaPageMonitorTests(unittest.TestCase):
         with patch("services.bma_page_monitor.BMAService", return_value=driver_service), \
              patch.object(monitor, "_visible_fields", return_value=[]), \
              patch.object(monitor, "_find_order_filter", return_value=filter_input), \
+             patch.object(monitor, "_switch_to_manage_frame"), \
+               patch.object(monitor, "_current_order_number", return_value=""), \
+               patch.object(monitor, "_wait_for_order"), \
              patch.object(monitor, "_find_order_link", return_value=order_link) as find_link, \
              patch("services.bma_page_monitor.sleep"):
             monitor._run(monitor_id, ["RES6780264"])
 
-        filter_input.send_keys.assert_called_once_with("RES6780264", "\ue007")
+        self.assertEqual(
+            [call.args for call in filter_input.send_keys.call_args_list],
+            [(Keys.CONTROL, "a"), ("RES6780264", Keys.ENTER)],
+        )
         find_link.assert_called_once_with(driver, "RES6780264")
         order_link.click.assert_called_once_with()
         self.assertEqual(monitor.get(monitor_id)["opened_wonum"], "RES6780264")
@@ -236,18 +484,81 @@ class BmaPageMonitorTests(unittest.TestCase):
         with patch("services.bma_page_monitor.BMAService", return_value=driver_service), \
              patch.object(monitor, "_visible_fields", return_value=[]), \
              patch.object(monitor, "_find_order_filter", return_value=filter_input), \
+             patch.object(monitor, "_switch_to_manage_frame"), \
+             patch.object(monitor, "_current_order_number", return_value=""), \
+             patch.object(monitor, "_wait_for_order"), \
              patch.object(monitor, "_find_order_link", return_value=order_link) as find_link, \
              patch("services.bma_page_monitor.sleep"):
             monitor._run(monitor_id, ["RES6780264", "RES67802192"])
 
         driver_service._create_browser.assert_called_once_with(page_load_strategy="eager", headless=False)
-        filter_input.clear.assert_called_once_with()
-        filter_input.send_keys.assert_called_once_with("RES6780264", "\ue007")
+        filter_input.click.assert_called_once_with()
+        self.assertEqual(
+            [call.args for call in filter_input.send_keys.call_args_list],
+            [(Keys.CONTROL, "a"), ("RES6780264", Keys.ENTER)],
+        )
         find_link.assert_called_once_with(driver, "RES6780264")
         order_link.click.assert_called_once_with()
         self.assertEqual(monitor.get(monitor_id)["opened_wonum"], "RES6780264")
         self.assertEqual(monitor.get(monitor_id)["page_url"], "https://maximo.example/wotrack#/main")
         self.assertEqual(monitor.get(monitor_id)["page_title"], "Rastrear Ordem de Trabalho")
+
+    def test_initial_quicksearch_opening_order_directly_starts_queue(self):
+        monitor = BmaPageMonitor()
+        thread = Mock()
+        with patch("services.bma_page_monitor.Thread", return_value=thread):
+            monitor_id = monitor.start([planned_order("RES6780264")])["monitor_id"]
+        session = monitor._sessions[monitor_id]
+        driver = Mock()
+        driver.current_url = "https://maximo.example/wotrack#/main"
+        driver.title = "Rastrear Ordem de Trabalho"
+        driver_service = Mock(timeout=30)
+        driver_service._create_browser.return_value = driver
+        filter_input = Mock()
+
+        with patch("services.bma_page_monitor.BMAService", return_value=driver_service), \
+             patch.object(monitor, "_visible_fields", return_value=[]), \
+             patch.object(monitor, "_find_order_filter", return_value=filter_input), \
+             patch.object(monitor, "_switch_to_manage_frame"), \
+             patch.object(monitor, "_current_order_number", return_value="RES6780264"), \
+             patch.object(monitor, "_wait_for_order") as wait_for_order, \
+             patch.object(monitor, "_find_order_link") as find_link, \
+             patch.object(monitor, "_process_order_queue", return_value=True) as process_queue, \
+             patch("services.bma_page_monitor.sleep"):
+            monitor._run(monitor_id, ["RES6780264"])
+
+        wait_for_order.assert_called_once_with(monitor_id, driver, "RES6780264")
+        find_link.assert_not_called()
+        process_queue.assert_called_once_with(monitor_id, driver, session["orders"])
+        self.assertEqual(monitor.get(monitor_id)["status"], "completed")
+
+    def test_monitor_reports_interaction_error_after_finding_quicksearch(self):
+        monitor = BmaPageMonitor()
+        thread = Mock()
+        with patch("services.bma_page_monitor.Thread", return_value=thread):
+            monitor_id = monitor.start([planned_order("RES6780264")])["monitor_id"]
+        session = monitor._sessions[monitor_id]
+        driver = Mock()
+        driver.current_url = "https://maximo.example/wotrack#/main"
+        driver.title = "Rastrear Ordem de Trabalho"
+        driver_service = Mock(timeout=30)
+        driver_service._create_browser.return_value = driver
+        filter_input = Mock()
+        filter_input.click.side_effect = WebDriverException("element not interactable")
+        fields = [{"tag": "input", "id": "quicksearch", "label": "Find Ordem de Trabalho"}]
+
+        with patch("services.bma_page_monitor.BMAService", return_value=driver_service), \
+             patch.object(monitor, "_visible_fields", return_value=fields), \
+             patch.object(monitor, "_find_order_filter", return_value=filter_input), \
+             patch.object(monitor, "_update", wraps=monitor._update) as update, \
+             patch("services.bma_page_monitor.sleep", side_effect=session["stop"].set):
+            monitor._run(monitor_id, ["RES6780264"])
+
+        messages = [call.kwargs.get("message", "") for call in update.call_args_list]
+        self.assertTrue(any(
+            "Campo de filtro localizado" in message and "element not interactable" in message
+            for message in messages
+        ))
 
     def test_monitor_waits_past_30_seconds_without_restarting_until_tracking_opens(self):
         monitor = BmaPageMonitor()
@@ -273,6 +584,9 @@ class BmaPageMonitorTests(unittest.TestCase):
              patch.object(monitor, "_visible_fields", side_effect=[[], [], fields]), \
              patch.object(monitor, "_find_order_filter", side_effect=[None, None, filter_input]), \
              patch.object(monitor, "_find_order_link", return_value=order_link), \
+             patch.object(monitor, "_switch_to_manage_frame"), \
+             patch.object(monitor, "_current_order_number", return_value=""), \
+             patch.object(monitor, "_wait_for_order"), \
              patch.object(monitor, "_open_work_order_app", return_value=False), \
              patch("services.bma_page_monitor.monotonic", side_effect=lambda: clock[0]), \
              patch("services.bma_page_monitor.sleep", side_effect=advance_clock):

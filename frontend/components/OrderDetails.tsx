@@ -7,7 +7,7 @@ const groups = [
     title: "Identificação e preparação",
     fields: [
       ["description", "Descrição"], ["location", "Local"], ["assetnum", "Equipamento"],
-      ["status", "Status"], ["worktype", "Tipo"], ["maintenanceshop", "Setor"],
+      ["status", "Status"], ["worktype", "Tipo"], ["maintenanceshop", "Setor"], ["lead", "Mão de obra"],
       ["planner", "Planejador"], ["crew", "Equipe"], ["jpnum", "Plano de trabalho"],
       ["pmnum", "PM"], ["route", "Rota"], ["parent", "OT principal"],
       ["interruptible", "Pode ser interrompida"],
@@ -18,7 +18,7 @@ const groups = [
     fields: [
       ["sneconstraint", "Não iniciar antes de"], ["fnlconstraint", "Não terminar depois de"],
       ["targstartdate", "Início previsto"], ["targcompdate", "Término previsto"],
-      ["schedstart", "Início programado"], ["schedfinish", "Término programado"],
+      ["schedstart", "Início planejado"], ["schedfinish", "Término programado"],
       ["pmduedate", "Vencimento da PM"], ["pmnextduedate", "Próximo vencimento da PM"],
       ["actstart", "Início real"], ["actfinish", "Término real"],
       ["reportdate", "Registro"], ["statusdate", "Alteração do status"],

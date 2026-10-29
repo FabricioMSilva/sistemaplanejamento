@@ -15,9 +15,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 
-BMA_QUICKREP_URL = (
-    "https://workspace-ui.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com/"
-    "maximo/oslc/graphite/manage-shell/index.html?event=loadapp&value=quickrep#/main"
+BMA_WOTRACK_URL = (
+    "https://workspace.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com/"
+    "maximo/oslc/graphite/manage-shell/index.html?event=loadapp&value=wotrack#/main"
 )
 PAGE_SIZE = 1000
 MAX_PAGES = 1000
@@ -26,7 +26,7 @@ EXCLUDED_STATUSES = ("CAN", "CLOSE", "COMP", "HISTEDIT")
 # Campos de planejamento validados no mxwo, sem trazer todos os controles internos.
 OT_FIELDS = (
     "wonum,siteid,status,status_description,description,description_longdescription,"
-    "location,assetnum,reportdate,reportedby,planner,schedstart,schedfinish,actstart,"
+    "location,assetnum,reportdate,reportedby,planner,lead,schedstart,schedfinish,actstart,"
     "actfinish,actlabhrs,estlabhrs,estdur,statusdate,changeby,changedate,"
     "targstartdate,targcompdate,worktype,maintenanceshop,origin,"
     "sneconstraint,fnlconstraint,pmduedate,pmnextduedate,pmnum,jpnum,route,crew,"
@@ -50,7 +50,7 @@ class BMAConfigurationError(BMAServiceError):
 
 class BMAService:
     def __init__(self) -> None:
-        self.quickrep_url = os.getenv("BMA_QUICKREP_URL", BMA_QUICKREP_URL).strip()
+        self.wotrack_url = os.getenv("BMA_WOTRACK_URL", BMA_WOTRACK_URL).strip()
         self.login_timeout = int(os.getenv("BMA_LOGIN_TIMEOUT", "600"))
         self.timeout = int(os.getenv("BMA_OSLC_TIMEOUT", "60"))
 
@@ -75,8 +75,8 @@ class BMAService:
             driver.set_page_load_timeout(self.timeout)
             driver.set_script_timeout(self.timeout)
             self._report(progress, "autenticacao", "Atualizando mão de obra. Conclua o login/MFA no Firefox.")
-            driver.get(self.quickrep_url)
-            self._wait_for_quickrep(driver, progress)
+            driver.get(self.wotrack_url)
+            self._wait_for_work_tracking(driver, progress)
             labor = self._collect_labor(driver, progress)
             roster = coletar_ativos(driver, self.login_timeout, progress) if verificar_nf else None
             return labor, roster
@@ -98,21 +98,21 @@ class BMAService:
         driver = self._create_browser(headless=True)
         records: list[dict[str, Any]] = []
         try:
-            self._report(progress, "quickrep", "Abrindo Relatório rápido do BMA.")
+            self._report(progress, "wotrack", "Abrindo Rastrear Ordem de Trabalho no BMA.")
             driver.set_page_load_timeout(self.timeout)
             try:
-                driver.get(self.quickrep_url)
+                driver.get(self.wotrack_url)
             except TimeoutException:
                 self._report(
                     progress,
-                    "quickrep",
-                    "A navegação excedeu o tempo de carga; verificando se o Quickrep abriu parcialmente.",
+                    "wotrack",
+                    "A navegação excedeu o tempo de carga; verificando se Rastrear Ordem abriu parcialmente.",
                 )
-            self._wait_for_quickrep(driver, progress)
-            self._report(progress, "oslc", "Sessão Quickrep pronta; iniciando consulta OSLC.")
+            self._wait_for_work_tracking(driver, progress)
+            self._report(progress, "oslc", "Rastrear Ordem autenticado; consultando OTs dos setores selecionados.")
             next_url = self._initial_query_url(selected_sectors)
             visited_urls: set[str] = set()
-            origin = urlsplit(self.quickrep_url)
+            origin = urlsplit(self.wotrack_url)
 
             for page_number in range(1, MAX_PAGES + 1):
                 if next_url in visited_urls:
@@ -134,6 +134,7 @@ class BMAService:
                     if not isinstance(record, dict):
                         continue
                     if self._matches_scope(record, selected_sectors):
+                        record.setdefault("lead", None)
                         self._complete_planned_labor(driver, record, progress)
                         records.append(record)
                 self._report(
@@ -185,7 +186,7 @@ class BMAService:
             "oslc.where": 'worksite="RES" and status="ACTIVE"',
         })
         next_url = f"/maximo/oslc/os/mxlabor?{query}"
-        origin = urlsplit(self.quickrep_url)
+        origin = urlsplit(self.wotrack_url)
         visited: set[str] = set()
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for page in range(1, MAX_PAGES + 1):
@@ -230,7 +231,7 @@ class BMAService:
         for record in records:
             record["children"] = []
         numbers = list(parents)
-        origin = urlsplit(self.quickrep_url)
+        origin = urlsplit(self.wotrack_url)
         for offset in range(0, len(numbers), 40):
             batch = numbers[offset:offset + 40]
             if any(not re.fullmatch(r"[A-Za-z0-9-]+", number) for number in batch):
@@ -302,7 +303,7 @@ class BMAService:
                 link = link.get("href")
             if not isinstance(link, str):
                 raise BMAServiceError("Paginação inválida na mão de obra planejada.")
-            url = self._normalize_next_page("", link, urlsplit(self.quickrep_url))
+            url = self._normalize_next_page("", link, urlsplit(self.wotrack_url))
             if url in visited:
                 raise BMAServiceError("Ciclo na paginação da mão de obra planejada.")
             visited.add(url)
@@ -331,11 +332,11 @@ class BMAService:
         options.profile = str(profile_dir)
         options.set_preference(
             "network.negotiate-auth.trusted-uris",
-            "login-fed.michelin.com,workspace-ui.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com",
+            "login-fed.michelin.com,workspace.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com",
         )
         options.set_preference(
             "network.automatic-ntlm-auth.trusted-uris",
-            "login-fed.michelin.com,workspace-ui.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com",
+            "login-fed.michelin.com,workspace.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com",
         )
 
         try:
@@ -386,7 +387,7 @@ class BMAService:
         if progress:
             progress(stage, message, page, orders)
 
-    def _wait_for_quickrep(
+    def _wait_for_work_tracking(
         self,
         driver,
         progress: ProgressCallback | None = None,
@@ -395,10 +396,10 @@ class BMAService:
         driver.set_script_timeout(self.timeout)
         login_clicked = False
 
-        def quickrep_ready(current_driver):
+        def work_tracking_ready(current_driver):
             nonlocal login_clicked
             current_driver.switch_to.default_content()
-            if self._find_quick_search(current_driver):
+            if self._find_work_tracking_search(current_driver):
                 return True
 
             page_url = current_driver.current_url
@@ -422,8 +423,8 @@ class BMAService:
                 "autenticacao",
                 "Validando a sessão do BMA em segundo plano.",
             )
-            WebDriverWait(driver, self.login_timeout, poll_frequency=0.5).until(quickrep_ready)
-            self._report(progress, "autenticado", "Relatório rápido pronto para consulta.")
+            WebDriverWait(driver, self.login_timeout, poll_frequency=0.5).until(work_tracking_ready)
+            self._report(progress, "autenticado", "Rastrear Ordem pronto para consulta.")
         except TimeoutException as exc:
             raise BMAServiceError(
                 "O BMA exige autenticação interativa ou MFA. A coleta em segundo plano "
@@ -447,8 +448,8 @@ class BMAService:
         return None
 
     @classmethod
-    def _find_quick_search(cls, driver, depth: int = 0):
-        matches = driver.find_elements(By.CSS_SELECTOR, "input[aria-label='Find Ordem de Trabalho']")
+    def _find_work_tracking_search(cls, driver, depth: int = 0):
+        matches = driver.find_elements(By.ID, "quicksearch")
         if any(element.is_displayed() and element.is_enabled() for element in matches):
             return True
         if depth >= 8:
@@ -459,7 +460,7 @@ class BMAService:
             try:
                 driver.switch_to.frame(frame)
                 switched = True
-                if cls._find_quick_search(driver, depth + 1):
+                if cls._find_work_tracking_search(driver, depth + 1):
                     return True
             except WebDriverException:
                 continue
@@ -574,8 +575,8 @@ class BMAService:
             status = result.get("status")
             if status in {401, 403} and not authentication_recovered:
                 authentication_recovered = True
-                driver.get(self.quickrep_url)
-                self._wait_for_quickrep(driver, progress)
+                driver.get(self.wotrack_url)
+                self._wait_for_work_tracking(driver, progress)
                 continue
             if status == 200:
                 try:
@@ -583,8 +584,8 @@ class BMAService:
                 except json.JSONDecodeError as exc:
                     if not authentication_recovered and "<html" in result.get("body", "").lower():
                         authentication_recovered = True
-                        driver.get(self.quickrep_url)
-                        self._wait_for_quickrep(driver, progress)
+                        driver.get(self.wotrack_url)
+                        self._wait_for_work_tracking(driver, progress)
                         continue
                     raise BMAServiceError("O Maximo retornou JSON inválido.") from exc
                 if isinstance(payload, dict) and not payload.get("Error"):

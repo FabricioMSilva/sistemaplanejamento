@@ -142,10 +142,26 @@ def mode_for(order: dict) -> str | None:
     return None
 
 
+def has_existing_planning_info(order: dict) -> bool:
+    status = text(order, "planning_status").strip()
+    if status:
+        return status != "Não planejada"
+    data = order.get("dados")
+    lead_known = (isinstance(data, dict) and "lead" in data) or "lead" in order
+    return bool(text(order, "lead").strip() or text(order, "schedstart").strip()) or not lead_known
+
+
+def corrective_available(order: dict) -> bool:
+    status = str(order.get("status") or text(order, "status")).strip().upper()
+    return mode_for(order) == "corretiva" and (
+        (status == "PREPARED" and not text(order, "schedstart").strip()) or status in ("WFSCH", "WSCH"))
+
+
 def eligible(sectors: list[str], start: str, end: str) -> list[dict]:
     return [order for order in listar_ordens_trabalho(sectors)
             if order["status"].upper() not in TERMINAL and
-            (mode_for(order) == "corretiva" or (mode_for(order) == "pm" and in_period(order, start, end)))]
+            (corrective_available(order) or (mode_for(order) == "pm" and in_period(order, start, end)
+                                                 and not has_existing_planning_info(order)))]
 
 
 def get_plan(plan_id: str, revision: int | None = None) -> dict:

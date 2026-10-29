@@ -62,7 +62,7 @@ export default function FollowUpPage() {
           <p className="text-xs text-slate-400">Planejador: {p.planejador}<br />Última revisão: {new Date(p.atualizado_em).toLocaleString("pt-BR")}</p>
           <p className="text-xs text-slate-500">{p.motivo}</p>
           <div className="flex flex-wrap gap-2">
-            <Link href={{ pathname: "/planejamento/alocacao", query: { plano: p.id, modo: "revisao" } }} className="pcm-primary-button inline-flex">Abrir cronograma e reprogramar →</Link>
+            <Link href={{ pathname: "/planejamento/alocacao", query: { plano: p.id } }} className="pcm-primary-button inline-flex">Abrir cronograma e reprogramar →</Link>
             <button type="button" aria-label={`Excluir planejamento ${p.inicio} a ${p.fim}`} title="Excluir planejamento e todas as revisões locais"
               disabled={!!deleting} onClick={() => void removePlan(p)} className="pcm-small-button border-rose-400/40 text-rose-300 hover:bg-rose-400/10 disabled:opacity-50">
               <Trash2 size={15} /> {deleting === p.id ? "Excluindo..." : "Excluir"}

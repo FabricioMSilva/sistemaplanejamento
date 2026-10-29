@@ -53,7 +53,7 @@ class PcmBrowserTests(unittest.TestCase):
                 (self.corrective, "E", "Corretiva sem data alvo teste", ""),
                 (f"OUT-{tag}", "S", "PM3 fora do horizonte", "2026-11-19"),
             ]:
-                record = {"worktype": kind, "description": description, "targstartdate": target}
+                record = {"worktype": kind, "description": description, "targstartdate": target, "lead": ""}
                 conn.execute("INSERT INTO ordens_trabalho (siteid,wonum,status,maintenanceshop,dados_json,sincronizado_em) VALUES (?,?,?,?,?,?)",
                              ("RES", number, "PREPARED", self.sector, json.dumps(record), now))
         team = {"setores": [self.sector], "inicio": "2026-10-26", "fim": "2026-10-27", "planejador": "PCM E2E",

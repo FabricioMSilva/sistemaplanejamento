@@ -58,7 +58,7 @@ class WorkforceIdentityTests(unittest.TestCase):
     def test_dedicated_refresh_never_collects_orders_and_propagates_sp_failure(self):
         service = BMAService()
         with (patch.object(service, "_create_browser") as browser,
-              patch.object(service, "_wait_for_quickrep"),
+              patch.object(service, "_wait_for_work_tracking"),
               patch.object(service, "_collect_labor", return_value=[profissional()]),
               patch("backend.services.nf_workforce.coletar_ativos", side_effect=BMAServiceError("SP failed"))):
             with self.assertRaisesRegex(BMAServiceError, "SP failed"):

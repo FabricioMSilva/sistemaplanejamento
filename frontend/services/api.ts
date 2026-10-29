@@ -40,6 +40,9 @@ export type OrdemTrabalho = {
   wonum: string;
   status: string;
   maintenanceshop: string;
+  lead?: string | null;
+  schedstart?: string | null;
+  planning_status?: "Planejada" | "Parcial" | "Não planejada" | "Não verificada";
   dados: Record<string, unknown>;
   sincronizado_em: string;
 };

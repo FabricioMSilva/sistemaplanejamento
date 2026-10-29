@@ -21,14 +21,17 @@ export function plannedLabor(order: OrdemTrabalho) {
 export function plannedBmaOrders(plan: WorkPlan) {
   const orders = new Map(plan.ordens.map((order) => [`${order.siteid}:${order.wonum}`, order]));
   const people = new Map(plan.pessoas.map((person) => [person.id, person]));
-  const grouped = new Map<string, { order: OrdemTrabalho; allocations: {
-    dia: string; horas: number; executantes: string[];
-  }[]; assignments: Map<string, { dia: string; laborcode: string; horas: number }>;
-    specialties: Set<string>; }>();
+  const grouped = new Map<string, {
+    order: OrdemTrabalho;
+    allocations: { dia: string; horas: number; executantes: string[] }[];
+    assignments: Map<string, { dia: string; laborcode: string; horas: number }>;
+    specialties: Set<string>;
+  }>();
   for (const block of plan.blocos) {
     const order = orders.get(block.ot);
     if (!order) continue;
-    const row = grouped.get(block.ot) ?? { order, allocations: [], assignments: new Map(), specialties: new Set() };
+    const row: NonNullable<ReturnType<typeof grouped.get>> = grouped.get(block.ot)
+      ?? { order, allocations: [], assignments: new Map(), specialties: new Set() };
     row.allocations.push({
       dia: block.dia,
       horas: block.horas,

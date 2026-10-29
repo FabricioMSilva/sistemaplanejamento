@@ -2,7 +2,7 @@ import Head from "next/head";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useState, type FocusEvent, type KeyboardEvent } from "react";
-import { LoaderCircle } from "lucide-react";
+import { AlertCircle, ArrowRight, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import planningOptions from "@/data/planejamento-opcoes.json";
 import {
   obterSincronizacao,
@@ -27,11 +27,12 @@ function isSyncActive(status: SyncRun["status"]): boolean {
 function synchronizationProgress(run: SyncRun | null): number {
   if (!run) return 0;
   if (run.status === "completed") return 100;
+  if (run.status === "failed") return 100;
   if (run.status === "saving") return 96;
   if (run.status === "queued") return 3;
 
   const stage = run.etapa.toLowerCase();
-  if (stage.includes("autentic") || stage.includes("navegador") || stage.includes("quickrep")) return 12;
+  if (stage.includes("autentic") || stage.includes("navegador") || stage.includes("wotrack")) return 12;
   if (stage.includes("concluido")) return 92;
   if (stage.includes("filha")) return 88;
   if (stage.includes("mao_de_obra")) return 92;
@@ -63,6 +64,7 @@ export default function PlanejamentoPage() {
   const [activeSectorIndex, setActiveSectorIndex] = useState(0);
   const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
   const [loading, setLoading] = useState(false);
+  const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [error, setError] = useState("");
 
   const syncedSectors = syncRun?.status === "completed" ? syncRun.setores : [];
@@ -116,6 +118,7 @@ export default function PlanejamentoPage() {
         setSyncRun(latest);
         setSectors(latest.setores);
         setLoading(isSyncActive(latest.status));
+        setSyncModalOpen(isSyncActive(latest.status));
 
         const finalRun = isSyncActive(latest.status)
           ? await watchSynchronization(latest.job_id, setSyncRun, () => cancelled)
@@ -143,6 +146,7 @@ export default function PlanejamentoPage() {
 
   async function handleSynchronize() {
     setLoading(true);
+    setSyncModalOpen(true);
     setError("");
     setSyncRun(null);
     try {
@@ -280,80 +284,123 @@ export default function PlanejamentoPage() {
             <button
               type="button"
               onClick={handleContinue}
-              className="rounded-lg bg-emerald-400 px-5 py-3 text-sm font-semibold text-navy-950 transition hover:bg-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2 focus:ring-offset-navy-950"
+              className="pcm-primary-button"
             >
-              Continuar planejamento →
+              Planejar com Banco de Dados existente <ArrowRight size={16} aria-hidden="true" />
             </button>
           )}
           <p className="w-full text-xs text-slate-400">Consulta novamente as OTs dos setores selecionados, incluindo mão de obra planejada (especialidade, quantidade e horas). O acesso ao BMA ocorre em segundo plano; se exigir MFA ou uma etapa manual, a coleta será interrompida. Não atualiza o cadastro de funcionários.</p>
           {error && <p className="mt-4 text-sm text-rose-300" role="alert">{error}</p>}
         </div>
 
-        {syncRun && (
-          <section className="mt-8 rounded-lg border border-white/10 bg-navy-900/70 p-4 sm:p-5" aria-labelledby="sync-log-title">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 id="sync-log-title" className="text-base font-semibold text-white">Acompanhamento da coleta</h2>
-              <span className={`rounded-md px-2.5 py-1 text-xs font-medium ${syncRun.status === "failed" ? "bg-rose-400/10 text-rose-300" : syncRun.status === "completed" ? "bg-emerald-400/10 text-emerald-300" : "bg-accent-400/10 text-accent-400"}`}>
-                {syncStatusLabels[syncRun.status]}
-              </span>
-            </div>
-            <p className="mt-2 text-sm text-slate-300" aria-live="polite">{syncRun.mensagem}</p>
-            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
-              <div>
-                <dt className="text-xs uppercase text-slate-500">Etapa</dt>
-                <dd className="mt-1 text-slate-200">{syncRun.etapa}</dd>
+        {syncModalOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="sync-progress-title"
+              aria-describedby="sync-progress-message"
+              className="w-full max-w-xl overflow-hidden rounded-xl border border-white/10 bg-navy-950 shadow-2xl shadow-black/40"
+            >
+              <div className="h-1 bg-accent-400/20">
+                <div
+                  className={`h-full transition-[width] duration-700 ${syncRun?.status === "failed" || error ? "bg-rose-400" : syncRun?.status === "completed" ? "bg-emerald-400" : "bg-accent-400"}`}
+                  style={{ width: `${synchronizationProgress(syncRun)}%` }}
+                />
               </div>
-              <div>
-                <dt className="text-xs uppercase text-slate-500">Página OSLC</dt>
-                <dd className="mt-1 text-slate-200">{syncRun.pagina_atual}</dd>
-              </div>
-              <div>
-                <dt className="text-xs uppercase text-slate-500">OTs lidas / salvas</dt>
-                <dd className="mt-1 text-slate-200">{syncRun.ots_lidas} / {syncRun.ots_salvas}</dd>
-              </div>
-            </dl>
-            {syncRun.erro && (
-              <p className="mt-4 rounded-md border border-rose-400/20 bg-rose-400/5 p-3 text-sm text-rose-300" role="alert">
-                {syncRun.erro}
-              </p>
-            )}
-            <ol className="mt-4 max-h-64 space-y-2 overflow-y-auto border-t border-white/10 pt-3" aria-label="Log de eventos da sincronização" aria-live="polite">
-              {syncRun.eventos.map((event, index) => (
-                <li key={`${event.data_hora}-${index}`} className="grid gap-1 text-xs sm:grid-cols-[150px_130px_1fr]">
-                  <time className="text-slate-500">{new Date(event.data_hora).toLocaleTimeString("pt-BR")}</time>
-                  <span className={event.nivel === "error" ? "text-rose-300" : "text-accent-400"}>{event.etapa}</span>
-                  <span className="text-slate-300">{event.mensagem}</span>
-                </li>
-              ))}
-            </ol>
-          </section>
-        )}
-        {loading && (
-          <div role="dialog" aria-modal="true" aria-labelledby="sync-progress-title"
-            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4">
-            <section className="w-full max-w-md rounded-lg border border-white/10 bg-navy-900 p-6 shadow-2xl">
-              <div className="flex items-center gap-3">
-                <LoaderCircle size={24} className="animate-spin text-accent-400" aria-hidden="true" />
-                <div>
-                  <h2 id="sync-progress-title" className="text-lg font-semibold text-white">Carregando OTs do BMA</h2>
-                  <p className="mt-1 text-xs text-slate-400">Progresso estimado</p>
+              <div className="p-6 sm:p-8">
+                <div className="flex items-start gap-4">
+                  <div className={`grid size-12 shrink-0 place-items-center rounded-full ${syncRun?.status === "failed" || error ? "bg-rose-400/10 text-rose-300" : syncRun?.status === "completed" ? "bg-emerald-400/10 text-emerald-300" : "bg-accent-400/10 text-accent-300"}`}>
+                    {loading
+                      ? <LoaderCircle size={25} className="animate-spin" aria-hidden="true" />
+                      : syncRun?.status === "completed"
+                        ? <CheckCircle2 size={25} aria-hidden="true" />
+                        : <AlertCircle size={25} aria-hidden="true" />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                      Atualização do banco · Ordens de trabalho
+                    </p>
+                    <h2 id="sync-progress-title" className="mt-1 text-xl font-semibold text-white">
+                      {loading ? "Coletando ordens de trabalho" : syncRun?.status === "completed" ? "Coleta concluída" : "Coleta não concluída"}
+                    </h2>
+                    <span className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${syncRun?.status === "failed" || error ? "bg-rose-400/10 text-rose-300" : syncRun?.status === "completed" ? "bg-emerald-400/10 text-emerald-300" : "bg-accent-400/10 text-accent-300"}`}>
+                      {syncRun ? syncStatusLabels[syncRun.status] : loading ? "Iniciando" : "Falhou"}
+                    </span>
+                  </div>
+                  {!loading && (
+                    <button
+                      type="button"
+                      onClick={() => setSyncModalOpen(false)}
+                      aria-label="Fechar acompanhamento da coleta"
+                      title="Fechar"
+                      className="rounded-md p-2 text-slate-400 transition hover:bg-white/5 hover:text-white focus:outline-none focus:ring-2 focus:ring-accent-400"
+                    >
+                      <X size={18} aria-hidden="true" />
+                    </button>
+                  )}
                 </div>
-                <span className="ml-auto text-2xl font-semibold tabular-nums text-white">
-                  {Math.round(synchronizationProgress(syncRun))}%
-                </span>
+
+                <p id="sync-progress-message" role="status" aria-live="polite" className="mt-6 text-sm leading-6 text-slate-300">
+                  {error || syncRun?.erro || syncRun?.mensagem || "Preparando a coleta no BMA..."}
+                </p>
+
+                <div
+                  role="progressbar"
+                  aria-label="Progresso estimado da coleta"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(synchronizationProgress(syncRun))}
+                  className="mt-5 h-1.5 overflow-hidden rounded-full bg-white/10"
+                >
+                  <div
+                    className={`h-full rounded-full transition-[width] duration-700 ${syncRun?.status === "failed" || error ? "bg-rose-400" : syncRun?.status === "completed" ? "bg-emerald-400" : "bg-accent-400"}`}
+                    style={{ width: `${synchronizationProgress(syncRun)}%` }}
+                  />
+                </div>
+
+                <dl className="mt-6 grid grid-cols-2 gap-4 border-t border-white/10 pt-5 sm:grid-cols-3">
+                  <div>
+                    <dt className="text-xs text-slate-500">Setores selecionados</dt>
+                    <dd className="mt-1 truncate text-sm font-medium text-slate-200" title={(syncRun?.setores ?? sectors).join(", ")}>
+                      {(syncRun?.setores ?? sectors).join(", ") || "-"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-slate-500">OTs lidas</dt>
+                    <dd className="mt-1 text-sm font-semibold tabular-nums text-white">{syncRun?.ots_lidas ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-slate-500">OTs gravadas</dt>
+                    <dd className="mt-1 text-sm font-semibold tabular-nums text-white">{syncRun?.ots_salvas ?? 0}</dd>
+                  </div>
+                </dl>
+
+                {syncRun && syncRun.pagina_atual > 0 && loading && (
+                  <p className="mt-4 text-xs text-slate-500">Página consultada: {syncRun.pagina_atual}</p>
+                )}
+
+                {!loading && (
+                  <div className="mt-7 flex flex-wrap justify-end gap-3 border-t border-white/10 pt-5">
+                    <button
+                      type="button"
+                      onClick={() => setSyncModalOpen(false)}
+                      className="pcm-small-button"
+                    >
+                      <X size={15} aria-hidden="true" /> Fechar
+                    </button>
+                    {canContinue && (
+                      <button
+                        type="button"
+                        onClick={handleContinue}
+                        className="pcm-primary-button w-full sm:w-auto"
+                      >
+                        Planejar com Banco de Dados existente <ArrowRight size={16} aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
-              <div role="progressbar" aria-label="Progresso estimado da carga de OTs"
-                aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(synchronizationProgress(syncRun))}
-                className="mt-5 h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full rounded-full bg-accent-400 transition-[width] duration-500"
-                  style={{ width: `${synchronizationProgress(syncRun)}%` }} />
-              </div>
-              <p role="status" aria-live="polite" className="mt-4 text-sm text-slate-300">
-                {syncRun?.mensagem || "Preparando a sincronização com o BMA..."}
-              </p>
-              {syncRun && <p className="mt-2 text-xs text-slate-500">
-                Página {syncRun.pagina_atual} · {syncRun.ots_lidas} OT(s) lidas
-              </p>}
             </section>
           </div>
         )}

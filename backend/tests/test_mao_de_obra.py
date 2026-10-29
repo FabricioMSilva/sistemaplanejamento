@@ -143,7 +143,7 @@ class LaborCollectionTests(unittest.TestCase):
             with (
                 self.subTest(failure=failure),
                 patch.object(service, "_create_browser") as browser,
-                patch.object(service, "_wait_for_quickrep"),
+                patch.object(service, "_wait_for_work_tracking"),
                 patch.object(service, "_fetch_payload", return_value={"member": []}),
                 patch.object(
                     service, "_collect_labor",

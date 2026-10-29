@@ -16,7 +16,7 @@ def order(number, kind="S", **fields):
     return {"siteid": "RES", "wonum": number, "status": "PREPARED",
             "maintenanceshop": "RES-PCMTEST", "sincronizado_em": "2026-10-23T12:00:00Z",
             "dados": {"worktype": kind, "description": "PM3 teste", "targstartdate": "2026-10-26",
-                      **fields}}
+                      "lead": "", **fields}}
 
 
 def team():
@@ -77,6 +77,18 @@ class PcmPlanningTests(unittest.TestCase):
         self.assertEqual(self.create()["id"], doc["id"])
         self.assertEqual(len(pcm.list_plans()), 1)
         self.assertTrue(pcm.get_pdf(doc["id"], 1).startswith(b"%PDF"))
+
+    def test_preventive_orders_with_lead_or_scheduled_start_are_not_eligible(self):
+        legacy = order("PM-LEGACY")
+        del legacy["dados"]["lead"]
+        self.orders.extend([
+            order("PM-LEAD", lead="B114376"),
+            order("PM-SCHEDULED", schedstart="2026-10-28T08:00:00-03:00"),
+            legacy,
+        ])
+        eligible = pcm.eligible(["RES-PCMTEST"], "2026-10-26", "2026-10-27")
+        self.assertEqual([item["wonum"] for item in eligible], ["PM1", "E1"])
+        self.assertTrue(pcm.has_existing_planning_info(legacy))
 
     def test_delete_plan_removes_plan_and_all_revisions(self):
         doc = self.create()

@@ -19,12 +19,26 @@ function load(name) {
   return m.exports;
 }
 const { buildDashboard, daysBetween, localDate, numericField, orderInPeriod } = load("pcmDashboard");
+const { cellText, hasExistingPlanningInfo } = load("orderFilters");
 function order(wonum, dados = {}, status = "PREPARED") {
-  return { wonum, siteid: "RES", status, maintenanceshop: "RES-TC-NF", sincronizado_em: "2026-10-22T19:00:00Z", dados };
+  return { wonum, siteid: "RES", status, maintenanceshop: "RES-TC-NF", sincronizado_em: "2026-10-22T19:00:00Z", dados: { lead: "", ...dados } };
 }
 const member = { orgid: "BR", matricula: "TEST", funcao: "180", jornada: "adm", inicio_ciclo: null, ajuste_horas: 0 };
 const plan = { setores: ["RES-TC-NF"], inicio: "2026-11-02", fim: "2026-11-06", executantes: [member] };
 const labor = { total: 4, profissionais: [{ orgid: "BR", matricula: "TEST", especialidades: [{ codigo: "180", descricao: "Mecanico" }] }] };
+
+test("SQL planning status wins and legacy orders remain unverified", () => {
+  const legacy = order("LEGACY");
+  delete legacy.dados.lead;
+  assert.equal(cellText(legacy, "planning_status"), "Não verificada");
+  assert.equal(hasExistingPlanningInfo(legacy), true);
+
+  const freshlyCollected = order("FRESH");
+  assert.equal(cellText(freshlyCollected, "planning_status"), "Não planejada");
+  assert.equal(hasExistingPlanningInfo(freshlyCollected), false);
+
+  assert.equal(cellText({ ...freshlyCollected, planning_status: "Parcial" }, "planning_status"), "Parcial");
+});
 
 test("missing estimates remain unknown, zero is a valid estimate, no fake criticality", () => {
   assert.equal(numericField(order("1"), "estlabhrs"), null);
@@ -116,6 +130,9 @@ test("preventive PM table only accepts I/S orders whose description starts with 
     order("PM3", { worktype: "I", description: "pM3 manutenção", targstartdate: "2026-11-03", estlabhrs: 5 }),
     order("NO-PM", { worktype: "S", description: "Inspeção preventiva", targstartdate: "2026-11-03", estlabhrs: 100 }),
     order("PREFIX-NOT", { worktype: "I", description: "Rotina PM3 manutenção", targstartdate: "2026-11-03", estlabhrs: 200 }),
+    order("PM-LEAD", { worktype: "I", description: "PM1 planejada", targstartdate: "2026-11-03", lead: "B114376", estlabhrs: 8 }),
+    order("PM-SCHEDULED", { worktype: "S", description: "PM2 planejada", targstartdate: "2026-11-03", schedstart: "2026-11-03T08:00:00-03:00", estlabhrs: 10 }),
+    order("PM-FULL", { worktype: "I", description: "PM3 planejada", targstartdate: "2026-11-03", lead: "B114376", schedstart: "2026-11-03T08:00:00-03:00", estlabhrs: 12 }),
     order("E-PM", { worktype: "E", description: "PM3 manutenção corretiva", targstartdate: "2026-11-03", estlabhrs: 7 }),
   ];
   const data = buildDashboard(rows, null, null, null, { inicio: "2026-11-02", fim: "2026-11-06" }, true);
@@ -123,6 +140,10 @@ test("preventive PM table only accepts I/S orders whose description starts with 
   assert.equal(data.pm.count, 3);
   assert.equal(data.pm.hours, 10);
   assert.equal(data.pmExcluded, 2);
+  assert.equal(data.pmAlreadyPlannedExcluded, 3);
+  assert.deepEqual(data.pmAllRows.map((row) => cellText(row, "planning_status")), [
+    "Não planejada", "Não planejada", "Não planejada", "Parcial", "Parcial", "Planejada",
+  ]);
   assert.deepEqual(data.corrective.rows.map((row) => row.wonum), ["E-PM"]);
 });
 test("corrective backlog is not restricted by target or scheduled dates", () => {

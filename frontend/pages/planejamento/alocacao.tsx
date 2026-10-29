@@ -2,26 +2,32 @@ import Head from "next/head";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent } from "react";
-import { ArrowLeft, Download, Eye, GripVertical, Save, Sparkles, CheckCircle2, CalendarDays, RefreshCw, Undo2, Pencil, X, SlidersHorizontal, ChevronLeft, ChevronRight, UsersRound } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, Download, ExternalLink, GripVertical, LoaderCircle, Save, Send, Sparkles, CalendarDays, RefreshCw, Undo2, Pencil, X, SlidersHorizontal, ChevronLeft, ChevronRight, UsersRound } from "lucide-react";
 import {
-  downloadSchedule, getSchedulePdf, getWorkPlan, orderKey, saveWorkPlan, suggestWorkPlan, refreshPlanSpecialties, updateWorkPlanTeam,
-  type Allocation, type PlanChange, type Requirement, type WorkPlan,
+  downloadSchedule, getBmaPageMonitor, getBmaSendStatus, getWorkPlan, openOrderInBma, orderKey, saveWorkPlan, sendPlanningToBmaReader, stopBmaPageMonitor,
+  suggestWorkPlan, refreshPlanSpecialties, updateWorkPlanTeam,
+  type Allocation, type BmaPageMonitor, type BmaSendStatus, type PlanChange, type Requirement, type WorkPlan,
 } from "@/services/pcm";
 import LaborPlanningModal from "@/components/LaborPlanningModal";
-import BmaScheduleReview from "@/components/BmaScheduleReview";
-import SchedulePdfViewer from "@/components/SchedulePdfViewer";
-import { cellText, normalize } from "@/utils/orderFilters";
+import { cellText, hasExistingPlanningInfo, isCorrectiveAvailable, normalize } from "@/utils/orderFilters";
 import { daysBetween, formatNumber, localDate } from "@/utils/pcmDashboard";
 import { formatPlanningDate } from "@/utils/laborPlanning";
-import { activityMode, activityCategory, activityDateConstraintError, activityPlanningComplete, allocatedDuration, availableDay, conflictingBlocks, dayLoad, provisionalDayLoad, distributeBatch, isTargetDay, pendingActivity, planningMetrics, prepareDraggedOrder, readyForAutoConfirmation, specialtyMatches, specialtyWorkload, weeklyBalance, weekStart, resequenceWeek } from "@/utils/workPlanning";
+import { activityMode, activityCategory, activityDateConstraintError, activityPlanningComplete, allocatedDuration, availableDay, conflictingBlocks, dayLoad, provisionalDayLoad, distributeBatch, isTargetDay, pendingActivity, planningMetrics, prepareDraggedOrder, specialtyMatches, specialtyWorkload, weeklyBalance, weekStart, resequenceWeek } from "@/utils/workPlanning";
 import OrderDetails from "@/components/OrderDetails";
 import NfeReportButton from "@/components/NfeReportButton";
 import { matchesOrderSpecialty, missingPlanningData, orderSpecialties, plannedLabor } from "@/utils/plannedLabor";
 
 const input = "w-full rounded-lg border border-white/15 bg-[#081729] p-2 text-sm text-white [color-scheme:dark]";
-type View = "pm" | "corretiva" | "revisao";
+type View = "pm" | "corretiva";
 type DragPayload = { ot: string; bloco?: string; origem?: string; lote?: string[] };
 const describeError = (error: unknown) => error instanceof Error ? error.message : "Falha na operação de planejamento.";
+const BMA_BADGES: Record<string, [string, string]> = {
+  planejada: ["Planejada no BMA", "border-emerald-400/50 bg-emerald-400/15 text-emerald-200"],
+  ja_planejada: ["Já planejada no BMA", "border-emerald-400/50 bg-emerald-400/15 text-emerald-200"],
+  pendente_planejador: ["Revisar planejamento", "border-amber-400/50 bg-amber-400/15 text-amber-200"],
+  erro: ["Erro no envio ao BMA", "border-rose-400/50 bg-rose-400/15 text-rose-200"],
+  nao_encontrada: ["Não encontrada no BMA", "border-rose-400/50 bg-rose-400/15 text-rose-200"],
+};
 const dayMonth = (value: string) => {
   const day = localDate(value);
   return day ? `${day.slice(8, 10)}/${day.slice(5, 7)}` : "—";
@@ -40,9 +46,11 @@ export default function AllocationPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
   const [teamEditorOpen, setTeamEditorOpen] = useState(false);
-  const [bmaReviewOpen, setBmaReviewOpen] = useState(false);
+  const [bmaMonitorId, setBmaMonitorId] = useState("");
+  const [bmaMonitor, setBmaMonitor] = useState<BmaPageMonitor | null>(null);
+  const [bmaMonitorError, setBmaMonitorError] = useState("");
+  const [bmaStatus, setBmaStatus] = useState<Record<string, BmaSendStatus>>({});
   const [dirty, setDirty] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [blockId, setBlockId] = useState("");
@@ -51,7 +59,6 @@ export default function AllocationPage() {
   const [members, setMembers] = useState<string[]>([]);
   const [executantFilter, setExecutantFilter] = useState<string[] | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
-  const [reviewed, setReviewed] = useState(false);
   const [specialtiesRefreshed, setSpecialtiesRefreshed] = useState(false);
   const [dropTarget, setDropTarget] = useState("");
   const [dropTargetTone, setDropTargetTone] = useState<"target" | "outside" | null>(null);
@@ -122,13 +129,41 @@ export default function AllocationPage() {
     getWorkPlan(id).then((doc) => {
       if (cancelled) return;
       setPlan(doc); setDay(doc.inicio);
-      setView(router.query.modo === "corretiva" ? "corretiva" : router.query.modo === "revisao" ? "revisao" : "pm");
+      setView(router.query.modo === "corretiva" ? "corretiva" : "pm");
       setDirty(false);
       setSpecialtiesRefreshed(false);
     }).catch((failure: unknown) => { if (!cancelled) setError(describeError(failure)); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
   }, [id]);
+
+  useEffect(() => {
+    if (!bmaMonitorId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const state = await getBmaPageMonitor(bmaMonitorId);
+        if (cancelled) return;
+        setBmaMonitor(state);
+        if (state.progress !== 100 && !["completed", "failed", "stopped"].includes(state.status))
+          timer = window.setTimeout(() => void poll(), 900);
+      } catch (failure) {
+        if (!cancelled) setBmaMonitorError(describeError(failure));
+      }
+    };
+    void poll();
+    return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [bmaMonitorId]);
+
+  useEffect(() => {
+    if (!id || !["completed", "failed", "stopped", undefined].includes(bmaMonitor?.status)) return;
+    let cancelled = false;
+    getBmaSendStatus(id).then((rows) => {
+      if (!cancelled) setBmaStatus(Object.fromEntries(rows.map((row) => [row.numero_ot, row])));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [id, bmaMonitor?.status]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -168,21 +203,24 @@ export default function AllocationPage() {
     }
     return [...options].sort((a, b) => a[1].localeCompare(b[1]));
   }, [plan]);
-  const visible = plan?.ordens.filter((o) => (view === "revisao" || activityMode(o) === view)
+  const visible = plan?.ordens.filter((o) => activityMode(o) === view
+    && (view !== "pm" || !hasExistingPlanningInfo(o))
+    && (view !== "corretiva" || isCorrectiveAvailable(o))
     && pendingActivity(plan, orderKey(o))
     && !plan.posicionamentos?.some((p) => p.ot === orderKey(o))
     && matchesOrderSpecialty(o, plan.requisitos[orderKey(o)], specialtyFilter)
     && (!categoryFilter || activityCategory(o) === categoryFilter)
     && normalize(`${o.wonum} ${cellText(o, "description")} ${cellText(o, "location")}`).includes(normalize(search))) ?? [];
   const checked = visible.filter((o) => plan?.requisitos[orderKey(o)].selecionada).map(orderKey);
-  const displayedStatus = plan ? dirty ? (busy ? "confirmando" : "alterações pendentes") : plan.status : "";
-  const excluded = plan?.ordens.filter((o) => {
-    const req = plan.requisitos[orderKey(o)];
-    return !req.duracao || allocatedDuration(plan, orderKey(o)) < req.duracao - 1e-6;
-  }) ?? [];
+  const displayedStatus = plan ? dirty ? (busy ? "salvando" : "alterações pendentes") : plan.status : "";
+  const firstPlannedPm = plan ? [...plan.blocos]
+    .sort((left, right) => left.dia.localeCompare(right.dia) || left.inicio - right.inicio || left.ot.localeCompare(right.ot))
+    .map((block) => plan.ordens.find((order) => orderKey(order) === block.ot))
+    .find((order) => order && activityMode(order) === "pm") : undefined;
+  const hasPlannedPm = Boolean(firstPlannedPm);
 
   function edit(next: WorkPlan) {
-    setPlan(next); setDirty(true); setReviewed(false); setMessage(""); setError("");
+    setPlan(next); setDirty(true); setMessage(""); setError("");
   }
   function markOrders(keys: string[], checked: boolean) {
     if (!plan) return;
@@ -226,7 +264,6 @@ export default function AllocationPage() {
         cell?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
       });
     }
-    if (exactDay && added && readyForAutoConfirmation(next)) void save(true, next, true);
   }
   function editRequirement(patch: Partial<Requirement>) {
     if (plan && requirement) edit({ ...plan, requisitos: { ...plan.requisitos, [selected]: { ...requirement, ...patch } } });
@@ -248,32 +285,29 @@ export default function AllocationPage() {
     setEditorOpen(true);
     requestAnimationFrame(() => document.getElementById("activity-editor")?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }
-  function change(confirmar = false, source: WorkPlan | null = plan): PlanChange {
+  function change(source: WorkPlan | null = plan): PlanChange {
     if (!source) throw new Error("Planejamento não carregado.");
     return { revisao: source.revisao, requisitos: source.requisitos, blocos: source.blocos,
-      indisponibilidades: source.indisponibilidades, motivo: "Atualização do planejamento", confirmar,
+      indisponibilidades: source.indisponibilidades, motivo: "Atualização do planejamento", confirmar: false,
       atualizar_especialidades: specialtiesRefreshed, posicionamentos: source.posicionamentos ?? [] };
   }
-  async function save(confirming = false, source: WorkPlan | null = plan, automatic = false) {
+  async function save(source: WorkPlan | null = plan) {
     if (!source) return;
     const sourceConflicts = conflictingBlocks(source);
-    if ((confirming || source.status === "confirmado") && sourceConflicts.size) { setError("Resolva os blocos vermelhos antes de confirmar ou alterar um planejamento confirmado."); return; }
-    if ((confirming || source.status === "confirmado") && source.posicionamentos?.length) {
-      setError("Há cartões posicionados com dados/horas pendentes. Complete ou retire antes de confirmar."); return;
+    if (source.status === "confirmado" && sourceConflicts.size) { setError("Resolva os blocos vermelhos antes de alterar este planejamento."); return; }
+    if (source.status === "confirmado" && source.posicionamentos?.length) {
+      setError("Complete ou retire os cartões posicionados antes de salvar as alterações."); return;
     }
-    if (confirming && !automatic && !reviewed) { setError("Confira as atividades incluídas e excluídas e marque a revisão."); return; }
     setBusy(true); setError("");
     try {
-      const saved = await saveWorkPlan(source.id, change(confirming, source));
-      setPlan(saved); setDirty(false); setReviewed(false);
+      const saved = await saveWorkPlan(source.id, change(source));
+      setPlan(saved); setDirty(false);
       setSpecialtiesRefreshed(false);
-      setMessage(automatic
-        ? `Planejamento confirmado automaticamente na revisão ${saved.revisao}. PDF arquivado localmente; nenhum envio ao BMA ou SharePoint foi realizado.`
-        : `Revisão ${saved.revisao} salva e PDF arquivado localmente. Nenhum envio ao BMA ou SharePoint foi realizado.`);
+      setMessage(`Alterações salvas na revisão ${saved.revisao}.`);
     } catch (failure) { setError(describeError(failure)); } finally { setBusy(false); }
   }
   async function suggest() {
-    if (!plan || view === "revisao") return;
+    if (!plan) return;
     const keys = checked;
     if (!keys.length) { setError("Marque as OTs que deseja incluir na sugestão."); return; }
     setBusy(true); setError("");
@@ -306,7 +340,7 @@ export default function AllocationPage() {
           indisponibilidades: current.indisponibilidades, posicionamentos: current.posicionamentos,
         } : {}),
       } : updated);
-      setDirty(hasDraft); setReviewed(false); setSpecialtiesRefreshed(false);
+      setDirty(hasDraft); setSpecialtiesRefreshed(false);
     } finally { setBusy(false); }
   }
   function beginPointer(event: PointerEvent<HTMLElement>, payload: DragPayload) {
@@ -412,9 +446,9 @@ export default function AllocationPage() {
     edit({ ...next, posicionamentos: pendingActivity(next, selected) ? plan.posicionamentos : plan.posicionamentos?.filter((p) => p.ot !== selected) });
     setBlockId(""); setMembers([]); setHours("");
     setEditorOpen(false);
-    setMessage("Atividade incluída no dia. A confirmação valida a capacidade semanal individual, especialidades, disponibilidade e duração total.");
+      setMessage("Atividade incluída no dia. Salve as alterações para registrar este rascunho.");
     const finalPlan = { ...next, posicionamentos: pendingActivity(next, selected) ? plan.posicionamentos : plan.posicionamentos?.filter((p) => p.ot !== selected) };
-    if (readyForAutoConfirmation(finalPlan)) void save(true, finalPlan, true);
+    setPlan(finalPlan);
   }
   function postpone(key: string, confirmRemoval = true) {
     if (!plan) return;
@@ -422,19 +456,55 @@ export default function AllocationPage() {
     edit({ ...plan, blocos: plan.blocos.filter((b) => b.ot !== key), posicionamentos: plan.posicionamentos?.filter((p) => p.ot !== key) });
     if (!confirmRemoval) setMessage(`${plan.ordens.find((order) => orderKey(order) === key)?.wonum ?? key} voltou à galeria de atividades.`);
   }
-  async function pdf(revision: number) {
+  async function createPdf() {
     if (!plan) return;
     setBusy(true); setError("");
-    try { await downloadSchedule(plan.id, revision); } catch (failure) { setError(describeError(failure)); } finally { setBusy(false); }
-  }
-  async function previewPdf(revision: number) {
-    if (!plan || dirty) return;
-    setBusy(true); setError("");
     try {
-      setPdfBlob(await getSchedulePdf(plan.id, revision));
+      let saved = plan;
+      if (dirty) {
+        saved = await saveWorkPlan(plan.id, change(plan));
+        setPlan(saved); setDirty(false); setSpecialtiesRefreshed(false);
+      }
+      await downloadSchedule(saved.id, saved.revisao);
     } catch (failure) { setError(describeError(failure)); } finally { setBusy(false); }
   }
-  function closePdfPreview() { setPdfBlob(null); }
+  async function sendPlanningToBma() {
+    if (!plan || !firstPlannedPm) return;
+    if (!window.confirm("Gravar no BMA as PMs (I/S) e corretivas (E) do cronograma? O BMA será acessado em segundo plano: datas planejadas e matrículas serão conferidas e ajustadas ao planejamento, com salvamento. Corretivas em WFSCH/WSCH também serão roteadas no workflow para PREPARED. OTs já planejadas são ignoradas.")) return;
+    setBusy(true); setError(""); setBmaMonitorError("");
+    try {
+      let saved = plan;
+      if (dirty) {
+        saved = await saveWorkPlan(plan.id, change(plan));
+        setPlan(saved); setDirty(false); setSpecialtiesRefreshed(false);
+      }
+      const { monitor_id, total } = await sendPlanningToBmaReader(saved.id);
+      setBmaMonitor({ monitor_id, status: "starting", mode: "planning_send", message: "Abrindo BMA...",
+        fields: [], stage: "starting", progress: 0, queue_total: total, current_order_index: 0,
+        current_wonum: null, completed_wonums: [], failed_wonum: null, opened_wonum: null,
+        processadas: 0, planejadas: 0, pendentes: 0, com_erro: 0, resultados: [] });
+      setBmaMonitorId(monitor_id);
+    } catch (failure) { setError(describeError(failure)); } finally { setBusy(false); }
+  }
+  async function openInBma(wonum: string) {
+    setError(""); setBmaMonitorError("");
+    try {
+      const { monitor_id } = await openOrderInBma(wonum);
+      setBmaMonitor({ monitor_id, status: "starting", mode: "open_ot", message: "Abrindo BMA...", fields: [],
+        stage: "starting", progress: 0, queue_total: 1, current_wonum: wonum });
+      setBmaMonitorId(monitor_id);
+    } catch (failure) { setError(describeError(failure)); }
+  }
+  async function stopBmaProgress() {
+    try { setBmaMonitor(await stopBmaPageMonitor(bmaMonitorId)); }
+    catch (failure) { setBmaMonitorError(describeError(failure)); }
+  }
+  function downloadBmaResults() {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(bmaMonitor?.resultados ?? [], null, 2)], { type: "application/json" }));
+    const link = Object.assign(document.createElement("a"), { href: url, download: `leitura-bma-${plan?.id ?? "planejamento"}.json` });
+    link.click(); URL.revokeObjectURL(url);
+  }
+  function closeBmaProgress() { setBmaMonitorId(""); setBmaMonitor(null); setBmaMonitorError(""); }
 
   return <>
     <Head><title>Bancada de planejamento | Centro PCM</title></Head>
@@ -451,8 +521,7 @@ export default function AllocationPage() {
           <Link href="/planejamento" className="pcm-small-button"><RefreshCw size={15} /> Atualizar banco pelo BMA</Link>
           <button className="pcm-small-button" disabled={busy} onClick={() => setTeamEditorOpen(true)}><UsersRound size={15} /> Editar mão de obra</button>
           <button className="pcm-small-button" disabled={busy} onClick={() => void refreshSpecialties()}><RefreshCw size={15} /> Reler especialidades do banco</button>
-          <button className="pcm-small-button" disabled={busy || dirty} onClick={() => void pdf(plan.revisao)}><Download size={15} /> PDF da revisão salva</button>
-          <button className="pcm-primary-button" disabled={busy} onClick={() => void save()}><Save size={15} /> {plan.status === "confirmado" ? "Salvar reprogramação" : "Salvar rascunho"}</button>
+          <button className="pcm-primary-button" disabled={busy} onClick={() => void save()}><Save size={15} /> Salvar rascunho</button>
         </div>}
       </header>
       {error && <p role="alert" className="rounded-lg border border-rose-400/30 bg-rose-400/10 p-4 text-sm text-rose-200">{error}</p>}
@@ -463,7 +532,6 @@ export default function AllocationPage() {
           setTeamEditorOpen(false);
           setMessage(`Equipe deste planejamento atualizada: ${team.executantes.length} executante(s). A equipe padrão do Centro PCM não foi alterada.`);
         }} />}
-      {bmaReviewOpen && plan && <BmaScheduleReview plan={plan} onClose={() => setBmaReviewOpen(false)} />}
       {!plan ? <p className="text-slate-400">{busy ? "Carregando planejamento..." : "Abra um planejamento pela carteira ou pelo acompanhamento."}</p> : <>
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Capacidade compartilhada">
           {[["Capacidade disponível", metrics?.capacity], ["Comprometido PM", metrics?.pm], ["Comprometido corretiva", metrics?.corrective], ["Saldo para encaixe", metrics?.remaining]].map(([label, value]) =>
@@ -510,14 +578,17 @@ export default function AllocationPage() {
           <section className="pcm-allocation-dock sticky top-0 z-40 mx-auto w-[90vw] rounded-xl border border-white/10 p-2 backdrop-blur-xl" aria-label="Controles e galeria de atividades">
             <div className="flex flex-wrap items-center gap-2">
               <nav className="flex min-w-0 flex-nowrap gap-1 overflow-x-auto" aria-label="Fluxo de alocação">
-                {([ ["pm", "1 · Planejar PM", "PM"], ["corretiva", "2 · Encaixar corretiva", "Corretiva"], ["revisao", "3 · Revisar e confirmar", "Revisar"] ] as const).map(([key, label, compact]) =>
-                  <button key={key} className={view === key ? "pcm-primary-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs" : "pcm-small-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs"} disabled={busy} aria-pressed={view === key} onClick={() => { setView(key); setLimit(60); }}><span className="sm:hidden">{compact}</span><span className="hidden sm:inline">{label}</span></button>)}
-                <button type="button" aria-label="4 · Visualizar cronograma PDF" title={busy ? "Aguarde a operação atual terminar." : dirty ? "Salve as alterações antes de visualizar o PDF da revisão atual." : "Visualizar cronograma PDF da revisão salva."}
-                  className="pcm-small-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs" disabled={busy || dirty} onClick={() => void previewPdf(plan.revisao)}>
-                  <Eye size={14} /><span className="sm:hidden">4 · PDF</span><span className="hidden sm:inline">4 · Visualizar cronograma PDF</span>
+                {([ ["pm", "1 · Planejar PM", "PM"], ["corretiva", "2 · Encaixar corretiva", "Corretiva"] ] as const).map(([key, label, compact]) =>
+                  <button key={key} className={view === key ? "pcm-primary-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs" : "pcm-small-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs"} disabled={busy || key === "corretiva" && !hasPlannedPm} title={key === "corretiva" && !hasPlannedPm ? "Planeje ao menos uma PM para liberar corretivas." : undefined} aria-pressed={view === key} onClick={() => { setView(key); setLimit(60); }}><span className="sm:hidden">{compact}</span><span className="hidden sm:inline">{label}</span></button>) }
+                <button type="button" className="pcm-small-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs" disabled={busy || !hasPlannedPm} title={!hasPlannedPm ? "Planeje ao menos uma PM para liberar o envio." : "Gravar no BMA datas e matrículas das PMs I/S do cronograma."} onClick={() => void sendPlanningToBma()}>
+                  <Send size={14} /><span className="sm:hidden">3 · BMA</span><span className="hidden sm:inline">3 · Enviar Planejamento</span>
+                </button>
+                <button type="button" aria-label="4 · Criar PDF" title={busy ? "Aguarde a operação atual terminar." : !hasPlannedPm ? "Planeje ao menos uma PM para criar o PDF." : dirty ? "O rascunho será salvo antes de baixar o PDF." : "Baixar o PDF do planejamento salvo."}
+                  className="pcm-small-button min-h-8 shrink-0 px-2 py-1 text-[11px] sm:px-2.5 sm:text-xs" disabled={busy || !hasPlannedPm} onClick={() => void createPdf()}>
+                  <Download size={14} /><span className="sm:hidden">4 · PDF</span><span className="hidden sm:inline">4 · Criar PDF</span>
                 </button>
               </nav>
-              {view !== "revisao" && <button className="pcm-small-button ml-auto min-h-8 shrink-0 px-2 py-1" aria-label={`Sugerir encaixe ${view === "pm" ? "PM" : "corretiva"}`} title={`Sugerir encaixe ${view === "pm" ? "PM" : "corretiva"}`} disabled={busy} onClick={() => void suggest()}><Sparkles size={14} /><span className="hidden sm:inline">Sugerir</span></button>}
+              <button className="pcm-small-button ml-auto min-h-8 shrink-0 px-2 py-1" aria-label={`Sugerir encaixe ${view === "pm" ? "PM" : "corretiva"}`} title={`Sugerir encaixe ${view === "pm" ? "PM" : "corretiva"}`} disabled={busy} onClick={() => void suggest()}><Sparkles size={14} /><span className="hidden sm:inline">Sugerir</span></button>
               <details id="portfolio-filters" className="relative shrink-0">
                 <summary className="pcm-small-button min-h-8 cursor-pointer list-none px-2 py-1"><SlidersHorizontal size={14} /><span className="hidden sm:inline">Filtros</span></summary>
                 <div className="absolute right-0 top-full z-50 grid w-[min(88vw,28rem)] gap-2 rounded-lg border border-white/15 bg-[#102235] p-3 shadow-xl sm:grid-cols-2">
@@ -533,19 +604,6 @@ export default function AllocationPage() {
                 </div>
               </details>
             </div>
-            {view === "revisao" && <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-white/10 pt-2">
-              <label className="mr-auto flex min-w-0 items-start gap-2 text-xs leading-relaxed text-slate-300">
-                <input className="mt-1 shrink-0" type="checkbox" checked={reviewed} onChange={(e) => setReviewed(e.target.checked)} />
-                <span>Conferi atividades incluídas, saldo, recursos e atividades que ficaram de fora.</span>
-              </label>
-              <button type="button" className="pcm-primary-button min-h-8 px-3 py-1 text-xs" disabled={!reviewed || conflicts.size > 0 || !!plan.posicionamentos?.length} onClick={() => void save(true)}>
-                <CheckCircle2 size={15} /> {plan.status === "confirmado" ? "Confirmar revisão local" : "Confirmar planejamento local"}
-              </button>
-              <button type="button" className="pcm-small-button min-h-8 px-3 py-1 text-xs"
-                disabled={busy || dirty || plan.status !== "confirmado"}
-                title={plan.status !== "confirmado" ? "Confirme a revisão local para habilitar." : dirty ? "Salve as alterações antes de continuar." : "A revisão está salva; o envio ao BMA ainda depende da configuração da integração."}
-                onClick={() => { setMessage(""); setBmaReviewOpen(true); }}>Enviar informações ao BMA</button>
-            </div>}
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/10 pt-2 text-[11px]">
               <label className="flex items-center gap-2 text-sky-200"><input type="checkbox" aria-label="Selecionar todas as OTs filtradas"
                 checked={visible.length > 0 && checked.length === visible.length} disabled={!visible.length}
@@ -556,7 +614,7 @@ export default function AllocationPage() {
                 className={`flex cursor-grab items-center gap-1 rounded border border-dashed px-2 py-1 text-sky-200 ${checked.length ? "border-sky-400/40 bg-sky-400/5" : "border-white/10 text-slate-500"}`}>
                 <GripVertical size={13} /> Arrastar lote
               </div>
-              <span className="ml-auto text-slate-400">Carteira {view === "revisao" ? "integrada" : view.toUpperCase()} · {visible.length} pendentes</span>
+              <span className="ml-auto text-slate-400">Carteira {view.toUpperCase()} · {visible.length} pendentes</span>
               <div className="flex gap-1">
                 <button type="button" aria-label="Rolar galeria para a esquerda" title="Anterior" className="pcm-small-button min-h-7 px-1.5 py-1" onClick={() => gallery.current?.scrollBy({ left: -320, behavior: "smooth" })}><ChevronLeft size={14} /></button>
                 <button type="button" aria-label="Rolar galeria para a direita" title="Próxima" className="pcm-small-button min-h-7 px-1.5 py-1" onClick={() => gallery.current?.scrollBy({ left: 320, behavior: "smooth" })}><ChevronRight size={14} /></button>
@@ -743,6 +801,9 @@ export default function AllocationPage() {
                         const order = plan.ordens.find((o) => orderKey(o) === b.ot);
                         const missing = order ? missingPlanningData(order) : [];
                         const complete = activityPlanningComplete(plan, b.ot);
+                        const sent = order ? bmaStatus[order.wonum] : undefined;
+                        const badge = sent && BMA_BADGES[sent.situacao];
+                        const plannedInBma = !!sent && ["planejada", "ja_planejada"].includes(sent.situacao);
                         return <div key={b.id} className="group relative mb-2">
                           <button type="button" draggable={!busy} onDragStart={(e) => drag(e, { ot: b.ot, bloco: b.id, origem: person.id })}
                           onPointerDown={(e) => beginPointer(e, { ot: b.ot, bloco: b.id, origem: person.id })}
@@ -752,12 +813,17 @@ export default function AllocationPage() {
                           onDragLeave={() => setInsertionTarget("")}
                           onDragEnd={() => { setInsertionTarget(""); setDropTarget(""); }}
                           onDrop={(e) => drop(e, d, person.id, b.id)}
-                          title={`${formatNumber(b.horas)} h neste dia · ${b.executantes.length} pessoa(s)${conflicts.has(b.id) ? " · Capacidade semanal excedida" : ""}${missing.length ? ` · Dados BMA ausentes: ${missing.join(", ")}` : ""}${complete && plan.status !== "confirmado" ? " · Confirmação automática pendente" : ""}. Clique para editar.`}
+                          title={`${formatNumber(b.horas)} h neste dia · ${b.executantes.length} pessoa(s)${conflicts.has(b.id) ? " · Capacidade semanal excedida" : ""}${missing.length ? ` · Dados BMA ausentes: ${missing.join(", ")}` : ""}${complete ? " · Alocação completa" : ""}. Clique para editar.`}
                           onClick={() => { if (suppressCardClick.current) { suppressCardClick.current = false; return; } openEditor(b.ot); setBlockId(b.id); setDay(b.dia); setHours(String(b.horas)); setMembers(b.executantes); }}
-                          className={`block w-full touch-none cursor-grab rounded border p-2 pr-7 text-left active:cursor-grabbing ${insertionTarget === `${person.id}:${b.id}` ? "border-t-4 border-t-sky-300 ring-2 ring-sky-300/40" : ""} ${conflicts.has(b.id) ? "border-rose-400 bg-rose-400/20 text-rose-100" : complete ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : missing.length ? "border-rose-400 bg-rose-400/10 text-rose-100" : order && activityMode(order) === "pm" ? "border-sky-400/25 bg-sky-400/10 text-sky-100" : "border-amber-400/25 bg-amber-400/10 text-amber-100"}`}>
+                          className={`block w-full touch-none cursor-grab rounded border p-2 pr-7 text-left active:cursor-grabbing ${plannedInBma ? "pb-8" : ""} ${insertionTarget === `${person.id}:${b.id}` ? "border-t-4 border-t-sky-300 ring-2 ring-sky-300/40" : ""} ${conflicts.has(b.id) ? "border-rose-400 bg-rose-400/20 text-rose-100" : complete ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : missing.length ? "border-rose-400 bg-rose-400/10 text-rose-100" : order && activityMode(order) === "pm" ? "border-sky-400/25 bg-sky-400/10 text-sky-100" : "border-amber-400/25 bg-amber-400/10 text-amber-100"}`}>
                           <strong>{order?.wonum} - {order && activityMode(order).toUpperCase()}</strong>
                           <span className="mt-1 block">{order && cellText(order, "description")}</span>
+                          {badge && <span title={`${sent.erro ?? badge[0]} · ${new Date(sent.registrado_em).toLocaleString("pt-BR")}`}
+                            className={`mt-1 inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold ${badge[1]}`}>{badge[0]}</span>}
                           </button>
+                          {order && plannedInBma && <button type="button" aria-label={`Abrir OT ${order.wonum} no BMA`} title="Abrir no BMA (Rastrear Ordem de Trabalho) somente para consulta"
+                            className="absolute bottom-1 right-1 z-10 inline-flex items-center gap-1 rounded border border-white/15 bg-[#081729] px-1.5 py-0.5 text-[10px] text-sky-200 hover:bg-sky-400/20"
+                            onClick={() => void openInBma(order.wonum)}><ExternalLink size={11} /> Abrir</button>}
                           <button type="button" aria-label={`Devolver OT ${order?.wonum ?? b.ot} à galeria`} title="Cancelar alocação e devolver à galeria"
                             className="absolute right-1 top-1 z-10 rounded p-1 text-slate-300 hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300"
                             onClick={() => postpone(b.ot, false)}><X size={13} /></button>
@@ -769,26 +835,49 @@ export default function AllocationPage() {
               </table>
             </div>
           </section>
-          {view === "revisao" && <section className="pcm-panel space-y-4 p-5">
-            <h2 className="pcm-title"><CheckCircle2 size={18} /> Revisão integrada e confirmação local</h2>
-            <p className="text-sm text-slate-300">{new Set(plan.blocos.map((b) => b.ot)).size} atividades com blocos · {excluded.length} não alocadas ou parciais.</p>
-            <p className="text-xs text-slate-400">Confira a grade completa acima. Atividades parciais não podem ser confirmadas: complete a duração ou retire a OT. Nenhuma atividade de fora será incluída automaticamente.</p>
-            <div className="max-h-80 space-y-2 overflow-y-auto">{excluded.map((o) => <div key={orderKey(o)} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-400/15 p-3 text-xs">
-              <span>{o.wonum} · {activityMode(o).toUpperCase()} · {cellText(o, "description")}<span className="mt-1 block text-slate-500">Alocado {formatNumber(allocatedDuration(plan, orderKey(o)))}/{formatNumber(plan.requisitos[orderKey(o)].duracao)} h · {plan.requisitos[orderKey(o)].observacao || "Sem observação registrada"}</span></span>
-              <button className="pcm-small-button" onClick={() => openEditor(orderKey(o))}>Preparar / encaixar</button>
-            </div>)}</div>
-          </section>}
         </fieldset>
         {!!suggestions.length && <details open className="pcm-panel p-4"><summary className="cursor-pointer text-sm text-amber-200">Pendências da última distribuição / sugestão ({suggestions.length})</summary><ul className="mt-3 max-h-60 space-y-1 overflow-y-auto text-xs text-slate-400">{suggestions.map((s, i) => <li key={i}>{s}</li>)}</ul></details>}
       </>}
       {handleDragging && <div className="pointer-events-none fixed bottom-5 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-sky-300 bg-[#081729] px-5 py-3 text-sm text-sky-100 shadow-xl">Arrastando OT · solte na célula do executante e dia</div>}
-      {pdfBlob && plan && <div role="dialog" aria-modal="true" aria-labelledby="schedule-pdf-title" className="fixed inset-0 z-[100] flex flex-col bg-slate-950/95 p-3 sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
-          <div><h2 id="schedule-pdf-title" className="text-base font-semibold text-white">Cronograma · revisão {plan.revisao}</h2><p className="mt-1 text-xs text-slate-400">Visualização do PDF salvo</p></div>
-          <div className="flex items-center gap-2"><button type="button" className="pcm-small-button" disabled={busy} onClick={() => void pdf(plan.revisao)}><Download size={14} /> Baixar PDF</button>
-            <button type="button" aria-label="Fechar visualização do PDF" title="Fechar" className="pcm-small-button p-2" onClick={closePdfPreview}><X size={16} /></button></div>
-        </div>
-        <SchedulePdfViewer file={pdfBlob} />
+      {bmaMonitorId && <div role="dialog" aria-modal="true" aria-labelledby="bma-progress-title" className="fixed inset-0 z-[100] grid place-items-center bg-black/70 p-4">
+        <section className="pcm-panel w-full max-w-lg space-y-5 p-5">
+          <div className="flex items-start gap-3">
+            {bmaMonitorError || bmaMonitor?.status === "failed" ? <AlertCircle size={21} className="mt-0.5 shrink-0 text-rose-300" />
+              : bmaMonitor?.progress === 100 ? <CheckCircle2 size={21} className="mt-0.5 shrink-0 text-emerald-300" />
+                : <LoaderCircle size={21} className="mt-0.5 shrink-0 animate-spin text-sky-300" />}
+            <div className="min-w-0 flex-1">
+              <h2 id="bma-progress-title" className="text-base font-semibold text-white">{bmaMonitor?.mode === "open_ot"
+                ? bmaMonitorError || bmaMonitor.status === "failed" ? "Não foi possível abrir a OT" : `Abrir OT ${bmaMonitor.current_wonum ?? ""} no BMA`
+                : bmaMonitorError || bmaMonitor?.status === "failed" ? "Envio ao BMA interrompido" : "Enviar planejamento ao BMA"}</h2>
+              <p role="status" className="mt-1 text-sm text-slate-300">{bmaMonitorError || bmaMonitor?.message || "Abrindo BMA..."}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/10" role="progressbar" aria-label="Progresso da leitura no BMA" aria-valuenow={bmaMonitor?.progress ?? 0} aria-valuemin={0} aria-valuemax={100}>
+              <div className="h-full rounded-full bg-sky-400 transition-[width] duration-500" style={{ width: `${bmaMonitor?.progress ?? 0}%` }} />
+            </div>
+            <span className="w-10 text-right text-xs tabular-nums text-slate-300">{bmaMonitor?.progress ?? 0}%</span>
+          </div>
+          {bmaMonitor?.mode === "planning_send" && <>
+            <dl className="grid grid-cols-4 gap-2 text-center text-xs">
+              <div className="rounded-lg border border-white/10 p-2"><dt className="text-slate-400">Processadas</dt><dd className="mt-1 text-lg font-semibold tabular-nums text-white">{bmaMonitor.processadas ?? 0}/{bmaMonitor.queue_total ?? 0}</dd></div>
+              <div className="rounded-lg border border-white/10 p-2"><dt className="text-slate-400">Planejadas</dt><dd className="mt-1 text-lg font-semibold tabular-nums text-emerald-200">{bmaMonitor.planejadas ?? 0}</dd></div>
+              <div className="rounded-lg border border-white/10 p-2"><dt className="text-slate-400">Planejador</dt><dd className="mt-1 text-lg font-semibold tabular-nums text-amber-200">{bmaMonitor.pendentes ?? 0}</dd></div>
+              <div className="rounded-lg border border-white/10 p-2"><dt className="text-slate-400">Com erro</dt><dd className="mt-1 text-lg font-semibold tabular-nums text-rose-300">{bmaMonitor.com_erro ?? 0}</dd></div>
+            </dl>
+            {!!bmaMonitor.resultados?.some((r) => r.erro) && <ul className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-white/10 p-2 text-xs">
+              {bmaMonitor.resultados.filter((r) => r.erro).map((r) => <li key={r.numero_ot} className={["planejada", "ja_planejada"].includes(r.situacao_consulta) ? "text-sky-200" : r.situacao_consulta === "pendente_planejador" ? "text-amber-200" : "text-rose-200"}>
+                <strong>{r.numero_ot}</strong>: {r.erro}</li>)}
+            </ul>}
+          </>}
+          <div className="flex flex-wrap justify-end gap-2">
+            {!!bmaMonitor?.resultados?.length && <button type="button" className="pcm-small-button" onClick={downloadBmaResults}><Download size={14} /> Baixar JSON</button>}
+            {bmaMonitor?.mode === "planning_send" && ["starting", "monitoring"].includes(bmaMonitor.status) &&
+              <button type="button" className="pcm-small-button text-amber-200" onClick={() => void stopBmaProgress()}>Interromper</button>}
+            {(bmaMonitor?.progress === 100 || bmaMonitor?.status === "failed" || bmaMonitorError || bmaMonitor?.status === "stopped") &&
+              <button type="button" className="pcm-small-button" onClick={closeBmaProgress}>Fechar</button>}
+          </div>
+        </section>
       </div>}
     </main>
   </>;

@@ -67,10 +67,70 @@ def init_db() -> None:
             )
             """
         )
+        order_columns = {row["name"] for row in conn.execute("PRAGMA table_xinfo(ordens_trabalho)")}
+        generated_columns = {
+            "lead": """CASE WHEN json_type(dados_json, '$.lead') = 'object'
+                THEN COALESCE(json_extract(dados_json, '$.lead.value'),
+                              json_extract(dados_json, '$.lead._value'),
+                              json_extract(dados_json, '$.lead.description'))
+                ELSE json_extract(dados_json, '$.lead') END""",
+            "schedstart": """CASE WHEN json_type(dados_json, '$.schedstart') = 'object'
+                THEN COALESCE(json_extract(dados_json, '$.schedstart.value'),
+                              json_extract(dados_json, '$.schedstart._value'),
+                              json_extract(dados_json, '$.schedstart.description'))
+                ELSE json_extract(dados_json, '$.schedstart') END""",
+            "planning_status": """CASE
+                WHEN NULLIF(TRIM(COALESCE(lead, '')), '') IS NOT NULL
+                     AND NULLIF(TRIM(COALESCE(schedstart, '')), '') IS NOT NULL
+                    THEN 'Planejada'
+                WHEN NULLIF(TRIM(COALESCE(lead, '')), '') IS NOT NULL
+                     OR NULLIF(TRIM(COALESCE(schedstart, '')), '') IS NOT NULL
+                    THEN 'Parcial'
+                WHEN json_type(dados_json, '$.lead') IS NULL THEN 'Não verificada'
+                ELSE 'Não planejada' END""",
+        }
+        for name, expression in generated_columns.items():
+            if name not in order_columns:
+                conn.execute(
+                    f"ALTER TABLE ordens_trabalho ADD COLUMN {name} TEXT "
+                    f"GENERATED ALWAYS AS ({expression}) VIRTUAL"
+                )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_ordens_trabalho_setor_status
             ON ordens_trabalho (maintenanceshop, status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ordens_planejamento_status
+            ON ordens_trabalho (maintenanceshop, planning_status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ordens_inicio_planejado
+            ON ordens_trabalho (schedstart)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ordens_trabalho_snapshots (
+                snapshot_date TEXT NOT NULL,
+                siteid TEXT NOT NULL,
+                wonum TEXT NOT NULL,
+                status TEXT,
+                maintenanceshop TEXT NOT NULL,
+                dados_json TEXT NOT NULL,
+                capturado_em TEXT NOT NULL,
+                PRIMARY KEY (snapshot_date, siteid, wonum)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ots_snapshots_data_setor
+            ON ordens_trabalho_snapshots (snapshot_date, maintenanceshop)
             """
         )
         conn.execute(
@@ -217,7 +277,39 @@ def init_db() -> None:
             ON planejamento_sync_events (job_id, id)
             """
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bma_envios_planejamento (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, envio_id TEXT NOT NULL, plano_id TEXT NOT NULL,
+                numero_ot TEXT NOT NULL, situacao TEXT NOT NULL, registrado_em TEXT NOT NULL,
+                dados_json TEXT NOT NULL
+            )
+        """)
         conn.commit()
+
+
+def registrar_envio_bma(envio_id: str, plano_id: str, resultado: dict) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO bma_envios_planejamento "
+            "(envio_id, plano_id, numero_ot, situacao, registrado_em, dados_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (envio_id, plano_id, resultado["numero_ot"], resultado["situacao_consulta"],
+             datetime.now(timezone.utc).isoformat(), json.dumps(resultado, ensure_ascii=False)),
+        )
+
+
+def listar_situacao_envios_bma(plano_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT numero_ot, situacao, registrado_em, dados_json FROM bma_envios_planejamento "
+            "WHERE plano_id=? ORDER BY id", (plano_id,),
+        ).fetchall()
+    ultimos = {}
+    for row in rows:
+        ultimos[row["numero_ot"]] = {
+            "numero_ot": row["numero_ot"], "situacao": row["situacao"], "registrado_em": row["registrado_em"],
+            "erro": json.loads(row["dados_json"]).get("erro"),
+        }
+    return list(ultimos.values())
 
 
 def criar_sincronizacao(job_id: str, setores: list[str], tipo: str = "ots") -> None:
@@ -328,6 +420,7 @@ def upsert_ordens_trabalho(
     if not selected_sectors:
         raise ValueError("Selecione ao menos um setor de manutenção.")
     sincronizado_em = datetime.now(timezone.utc).isoformat()
+    snapshot_date = datetime.now().astimezone().date().isoformat()
     salvas = 0
 
     with (nullcontext(connection) if connection is not None else get_connection()) as conn:
@@ -385,6 +478,27 @@ def upsert_ordens_trabalho(
                     sincronizado_em = excluded.sincronizado_em
                 """,
                 (
+                    siteid,
+                    wonum,
+                    status,
+                    maintenanceshop,
+                    serialized_record,
+                    sincronizado_em,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO ordens_trabalho_snapshots (
+                    snapshot_date, siteid, wonum, status, maintenanceshop, dados_json, capturado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, siteid, wonum) DO UPDATE SET
+                    status = excluded.status,
+                    maintenanceshop = excluded.maintenanceshop,
+                    dados_json = excluded.dados_json,
+                    capturado_em = excluded.capturado_em
+                """,
+                (
+                    snapshot_date,
                     siteid,
                     wonum,
                     status,
@@ -607,7 +721,8 @@ def listar_ordens_trabalho(
     if not selected_sectors:
         return []
     query = """
-        SELECT siteid, wonum, status, maintenanceshop, dados_json, sincronizado_em
+         SELECT siteid, wonum, status, maintenanceshop, dados_json, sincronizado_em,
+             lead, schedstart, planning_status
         FROM ordens_trabalho
         WHERE maintenanceshop IN ({sector_placeholders})
     """
@@ -629,6 +744,9 @@ def listar_ordens_trabalho(
             "status": row["status"],
             "maintenanceshop": row["maintenanceshop"],
             "dados": json.loads(row["dados_json"]),
+            "lead": row["lead"],
+            "schedstart": row["schedstart"],
+            "planning_status": row["planning_status"],
             "sincronizado_em": row["sincronizado_em"],
         }
         for row in rows

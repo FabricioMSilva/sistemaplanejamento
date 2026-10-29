@@ -4,13 +4,15 @@ from copy import deepcopy
 from datetime import date, datetime
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
+import unicodedata
 from uuid import uuid4
 
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
 from services.BMAService import BMAService, BMAServiceError
+from services.bma_planning_reader import PlanningReadMixin
 
 WOTRACK_URL = (
     "https://workspace.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com/"
@@ -18,7 +20,7 @@ WOTRACK_URL = (
 )
 
 
-class BmaPageMonitor:
+class BmaPageMonitor(PlanningReadMixin):
     def __init__(self):
         self._lock = Lock()
         self._browser_lock = Lock()
@@ -27,8 +29,8 @@ class BmaPageMonitor:
     def start(self, orders: list[dict]):
         if not isinstance(orders, list) or not orders:
             raise BMAServiceError("Selecione um planejamento de OT válido.")
-        if len(orders) > 1:
-            raise BMAServiceError("Envie uma OT por vez para o rastreamento do BMA.")
+        if len(orders) > 100:
+            raise BMAServiceError("Selecione no máximo 100 OTs por fila.")
         selected = []
         normalized_orders = []
         for order in orders:
@@ -58,7 +60,7 @@ class BmaPageMonitor:
                     hours = float(assignment.get("horas", 0))
                 except (TypeError, ValueError) as exc:
                     raise BMAServiceError(f"Data ou horas inválidas na OT {wonum}.") from exc
-                laborcode = str(assignment.get("laborcode", "")).strip()
+                laborcode = str(assignment.get("laborcode", "")).strip().upper()
                 if (
                     not laborcode or not all(character.isalnum() or character == "-" for character in laborcode)
                     or not 0 < hours <= 24 or not planned_start.date() <= assignment_day <= planned_finish.date()
@@ -96,6 +98,11 @@ class BmaPageMonitor:
                     "elapsed_seconds": 0,
                     "stage": "starting",
                     "selected_wonums": selected,
+                    "queue_total": len(selected),
+                    "current_order_index": 0,
+                    "current_wonum": None,
+                    "completed_wonums": [],
+                    "failed_wonum": None,
                     "opened_wonum": None,
                     "page_url": "",
                     "page_title": "",
@@ -108,6 +115,60 @@ class BmaPageMonitor:
         for driver in drivers_to_close:
             Thread(target=self._close_browser, args=(driver,), daemon=True).start()
         Thread(target=self._run, args=(monitor_id, selected), daemon=True).start()
+        return {"monitor_id": monitor_id}
+
+    def start_search(self, wonum: str):
+        return self._start_read_only(wonum, "search_only")
+
+    def start_open_order(self, wonum: str):
+        return self._start_read_only(wonum, "open_order")
+
+    def _start_read_only(self, wonum: str, mode: str):
+        wonum = str(wonum or "").strip().upper()
+        if not wonum or not all(character.isalnum() or character == "-" for character in wonum):
+            raise BMAServiceError("Número da OT inválido.")
+        drivers_to_close = []
+        with self._lock:
+            for session in self._sessions.values():
+                if session["state"]["status"] in {"starting", "monitoring", "stopping"}:
+                    session["stop"].set()
+                    if session.get("driver"):
+                        drivers_to_close.append(session["driver"])
+                    session["state"].update(
+                        status="stopping",
+                        message="Substituindo a sessão BMA pela busca somente leitura.",
+                    )
+            monitor_id = uuid4().hex
+            session = {
+                "state": {
+                    "monitor_id": monitor_id,
+                    "mode": mode,
+                    "inspection_only": True,
+                    "status": "starting",
+                    "message": "Abrindo Rastreamento de Ordem de Trabalho.",
+                    "fields": [],
+                    "elapsed_seconds": 0,
+                    "stage": "starting",
+                    "progress": 0,
+                    "selected_wonums": [wonum],
+                    "queue_total": 1,
+                    "current_order_index": 0,
+                    "current_wonum": wonum,
+                    "completed_wonums": [],
+                    "failed_wonum": None,
+                    "opened_wonum": None,
+                    "page_url": "",
+                    "page_title": "",
+                },
+                "stop": Event(),
+                "driver": None,
+                "orders": [],
+            }
+            self._sessions[monitor_id] = session
+        for driver in drivers_to_close:
+            Thread(target=self._close_browser, args=(driver,), daemon=True).start()
+        target = self._run_open_order_only if mode == "open_order" else self._run_search_only
+        Thread(target=target, args=(monitor_id, wonum), daemon=True).start()
         return {"monitor_id": monitor_id}
 
     @staticmethod
@@ -190,20 +251,20 @@ class BmaPageMonitor:
     @staticmethod
     def _find_order_filter(driver, depth=0):
         quicksearch_inputs = driver.find_elements(By.ID, "quicksearch")
+        if quicksearch_inputs:
+            return next((element for element in quicksearch_inputs
+                         if element.is_displayed() and element.is_enabled()), None)
+
         column_filters = driver.find_elements(By.CSS_SELECTOR, "input.tablefilterfield")
         labeled_inputs = driver.find_elements(
             By.CSS_SELECTOR, "input[aria-label], input[placeholder], input[title]",
         )
-        column_filter_ids = {element.id for element in column_filters}
-        candidates = quicksearch_inputs + column_filters + [
+        column_filter_ids = {element.get_attribute("id") for element in column_filters}
+        candidates = column_filters + [
             element for element in labeled_inputs
-            if element.id not in column_filter_ids and element.id != "quicksearch"
+            if element.get_attribute("id") not in column_filter_ids
         ]
         for element in candidates:
-            if element.id == "quicksearch":
-                if element.is_displayed() and element.is_enabled():
-                    return element
-                continue
             label = driver.execute_script("""
                 const input = arguments[0];
                 const ids = (input.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean);
@@ -224,19 +285,29 @@ class BmaPageMonitor:
         if depth >= 8:
             return None
         for frame in driver.find_elements(By.TAG_NAME, "iframe"):
+            element = None
+            switched = False
             try:
                 driver.switch_to.frame(frame)
+                switched = True
                 element = BmaPageMonitor._find_order_filter(driver, depth + 1)
                 if element:
                     return element
             except WebDriverException:
                 continue
             finally:
-                try:
-                    driver.switch_to.parent_frame()
-                except WebDriverException:
-                    driver.switch_to.default_content()
+                if switched and not element:
+                    try:
+                        driver.switch_to.parent_frame()
+                    except WebDriverException:
+                        driver.switch_to.default_content()
         return None
+
+    @staticmethod
+    def _submit_order_filter(order_filter, wonum):
+        order_filter.click()
+        order_filter.send_keys(Keys.CONTROL, "a")
+        order_filter.send_keys(wonum, Keys.ENTER)
 
     @staticmethod
     def _find_order_link(driver, wonum: str, depth=0):
@@ -259,18 +330,22 @@ class BmaPageMonitor:
         if depth >= 8:
             return None
         for frame in driver.find_elements(By.TAG_NAME, "iframe"):
+            link = None
+            switched = False
             try:
                 driver.switch_to.frame(frame)
+                switched = True
                 link = BmaPageMonitor._find_order_link(driver, wonum, depth + 1)
                 if link:
                     return link
             except WebDriverException:
                 continue
             finally:
-                try:
-                    driver.switch_to.parent_frame()
-                except WebDriverException:
-                    driver.switch_to.default_content()
+                if switched and not link:
+                    try:
+                        driver.switch_to.parent_frame()
+                    except WebDriverException:
+                        driver.switch_to.default_content()
         return None
 
     @staticmethod
@@ -330,6 +405,455 @@ class BmaPageMonitor:
                 return element
         return None
 
+    @staticmethod
+    def _switch_to_manage_frame(driver):
+        driver.switch_to.default_content()
+        frames = driver.find_elements(By.CSS_SELECTOR, 'iframe[name="manage-shell_Iframe"]')
+        if not frames:
+            frames = [frame for frame in driver.find_elements(By.TAG_NAME, "iframe")
+                      if frame.get_attribute("name") == "manage-shell_Iframe"]
+        if frames:
+            driver.switch_to.frame(frames[0])
+            return
+        if not BmaPageMonitor._enter_maximo_document(driver):
+            raise BMAServiceError("O frame do Maximo não foi encontrado.")
+
+    @staticmethod
+    def _enter_maximo_document(driver, depth=0):
+        # Documento do Maximo = onde está o campo "Find Ordem de Trabalho" (#quicksearch).
+        if driver.find_elements(By.ID, "quicksearch"):
+            return True
+        if depth >= 8:
+            return False
+        for frame in driver.find_elements(By.TAG_NAME, "iframe"):
+            try:
+                driver.switch_to.frame(frame)
+            except WebDriverException:
+                continue
+            if BmaPageMonitor._enter_maximo_document(driver, depth + 1):
+                return True
+            driver.switch_to.parent_frame()
+        return False
+
+    @staticmethod
+    def _normalize_text(value):
+        normalized = unicodedata.normalize("NFKD", str(value or ""))
+        return " ".join("".join(character for character in normalized
+                               if not unicodedata.combining(character)).casefold().split())
+
+    @staticmethod
+    def _find_labeled_input(driver, label):
+        return driver.execute_script("""
+            const normalize = (value) => String(value || '').normalize('NFD')
+              .replace(/[\\u0300-\\u036f]/g, '').trim().toLocaleLowerCase();
+            const wanted = normalize(arguments[0]);
+            return Array.from(document.querySelectorAll('input, textarea, select'))
+              .find((element) => {
+                const rect = element.getBoundingClientRect();
+                if (!rect.width || !rect.height || element.disabled) return false;
+                const ids = (element.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean);
+                const names = [element.getAttribute('aria-label'), element.getAttribute('placeholder'),
+                  element.getAttribute('title'), ...(element.labels ? Array.from(element.labels).map((item) => item.innerText) : []),
+                  ...ids.map((id) => document.getElementById(id)?.innerText || '')];
+                return names.some((name) => normalize(name) === wanted);
+              }) || null;
+        """, label)
+
+    # Mensagens do Maximo respondidas com OK; as demais são fechadas e interrompem a OT.
+    ACCEPTED_MAXIMO_MESSAGES = {
+        "BMXAA0159W",  # datas programadas posteriores à restrição de término: aplica a data do planejador
+    }
+
+    @staticmethod
+    def _handle_maximo_message(driver):
+        message = driver.execute_script("""
+            const visible = (el) => { const r = el.getBoundingClientRect(); const s = window.getComputedStyle(el);
+              return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+            const norm = (v) => String(v || '').replace(/\\s+/g, ' ').trim();
+            for (const box of document.querySelectorAll('[role=dialog],[role=alertdialog],.dijitDialog,[id^="msgbox"]')) {
+              if (!visible(box)) continue;
+              const text = norm(box.innerText);
+              const code = text.match(/BMXAA\\d+[A-Z]/);
+              if (!code) continue;
+              const buttons = Array.from(box.querySelectorAll('button,[role=button]')).filter(visible);
+              const find = (name) => buttons.find((b) => norm(b.innerText).toLowerCase() === name) || null;
+              return { code: code[0], text: text.slice(0, 400), ok: find('ok'), close: find('fechar') || find('close') };
+            }
+            return null;
+        """)
+        if not isinstance(message, dict):
+            return False
+        accepted = message["code"] in BmaPageMonitor.ACCEPTED_MAXIMO_MESSAGES and message.get("ok")
+        button = message.get("ok") if accepted else message.get("close") or message.get("ok")
+        if button:
+            button.click()
+        if not accepted:
+            raise BMAServiceError(f"Mensagem do BMA: {message['text']}")
+        handled = getattr(driver, "_bma_messages", [])
+        handled.append(f"{message['code']} respondida com OK")
+        driver._bma_messages = handled
+        return True
+
+    @staticmethod
+    def _wait_maximo_idle(driver, timeout=60):
+        # O Maximo bloqueia a tela com overlays de espera enquanto processa; cliques nesse período são interceptados.
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
+            try:
+                if BmaPageMonitor._handle_maximo_message(driver):
+                    sleep(0.5)
+                    continue
+                # .wait_modal é só o fundo de janelas (workflow, mensagens); não indica carregamento.
+                busy = driver.execute_script("""
+                    return Array.from(document.querySelectorAll('.bx--loading-overlay')).some((element) => {
+                      const rect = element.getBoundingClientRect();
+                      const style = window.getComputedStyle(element);
+                      return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                        && style.visibility !== 'hidden' && !element.className.includes('--stop');
+                    });
+                """)
+            except WebDriverException:
+                busy = False
+            if busy is not True:
+                return
+            sleep(0.25)
+        raise BMAServiceError("O BMA ficou carregando (tela bloqueada) por tempo demais.")
+
+    @staticmethod
+    def _click_when_idle(driver, element):
+        for attempt in range(5):
+            BmaPageMonitor._wait_maximo_idle(driver)
+            try:
+                element.click()
+                return
+            except ElementClickInterceptedException:
+                if attempt == 4:
+                    raise
+                sleep(0.5)
+
+    @staticmethod
+    def _click_tab(driver, label):
+        wanted = BmaPageMonitor._normalize_text(label)
+        BmaPageMonitor._wait_maximo_idle(driver)
+        for tab in driver.find_elements(By.XPATH, "//*[@role='tab']"):
+            if BmaPageMonitor._normalize_text(tab.text) == wanted and tab.is_displayed():
+                BmaPageMonitor._click_when_idle(driver, tab)
+                BmaPageMonitor._wait_maximo_idle(driver)
+                return
+        raise BMAServiceError(f"A aba {label} do Maximo não foi encontrada.")
+
+    @staticmethod
+    def _replace_input(element, value, *, select_suggestion=False):
+        BmaPageMonitor._click_when_idle(element.parent, element)
+        element.send_keys(Keys.CONTROL, "a")
+        element.send_keys(value)
+        if select_suggestion:
+            element.send_keys(Keys.ENTER)
+        element.send_keys(Keys.TAB)
+        BmaPageMonitor._wait_maximo_idle(element.parent)
+
+    @staticmethod
+    def _find_assignment_grid(driver):
+        for table in driver.find_elements(By.TAG_NAME, "table"):
+            if not table.is_displayed():
+                continue
+            rows = table.find_elements(By.XPATH, ".//tr")
+            for header in rows:
+                cells = header.find_elements(By.XPATH, "./th | ./td")
+                labels = [BmaPageMonitor._normalize_text(cell.text) for cell in cells]
+                required = {"mao de obra", "inicio planejado", "horas"}
+                if required.issubset(set(labels)):
+                    columns = {label: labels.index(label) for label in required}
+                    data_rows = []
+                    for row in rows:
+                        if row == header:
+                            continue
+                        row_cells = row.find_elements(By.XPATH, "./th | ./td")
+                        if len(row_cells) <= max(columns.values()):
+                            continue
+                        if row_cells[columns["mao de obra"]].find_elements(By.TAG_NAME, "input"):
+                            data_rows.append((row, row_cells))
+                    return table, columns, data_rows
+        raise BMAServiceError("A grade de Atribuições do Maximo não foi encontrada.")
+
+    @staticmethod
+    def _assignment_input(cells, column):
+        inputs = cells[column].find_elements(By.TAG_NAME, "input")
+        return inputs[0] if inputs else None
+
+    @staticmethod
+    def _input_value(element):
+        return (element.get_attribute("value") or "").strip() if element else ""
+
+    @staticmethod
+    def _parse_maximo_datetime(value):
+        raw = str(value or "").strip()
+        for pattern in (
+            "%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p",
+            "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%d/%m/%Y",
+        ):
+            try:
+                return datetime.strptime(raw, pattern)
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _parse_maximo_hours(value):
+        raw = str(value or "").strip()
+        if ":" in raw:
+            hours, minutes = raw.split(":", 1)
+            try:
+                return int(hours) + int(minutes) / 60
+            except ValueError:
+                return None
+        try:
+            return float(raw.replace(",", "."))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_maximo_hours(hours):
+        minutes = round(float(hours) * 60)
+        return f"{minutes // 60}:{minutes % 60:02d}"
+
+    @staticmethod
+    def _current_order_number(driver):
+        field = BmaPageMonitor._find_labeled_input(driver, "Ordem de Trabalho")
+        if field:
+            return BmaPageMonitor._input_value(field)
+        for element in driver.find_elements(By.CSS_SELECTOR, 'input[id$="-tb"]'):
+            if "_tdrow_" not in (element.get_attribute("id") or ""):
+                value = BmaPageMonitor._input_value(element)
+                if value:
+                    return value
+        return ""
+
+    def _current_order_number_in_frames(self, driver, depth=0):
+        current = self._current_order_number(driver)
+        if current or depth >= 8:
+            return current
+        for frame in driver.find_elements(By.TAG_NAME, "iframe"):
+            switched = False
+            try:
+                driver.switch_to.frame(frame)
+                switched = True
+                current = self._current_order_number_in_frames(driver, depth + 1)
+            except WebDriverException:
+                continue
+            finally:
+                if switched:
+                    try:
+                        driver.switch_to.parent_frame()
+                    except WebDriverException:
+                        driver.switch_to.default_content()
+            if current:
+                return current
+        return ""
+
+    def _wait_until(self, monitor_id, predicate, message, timeout=60):
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if not session or session["stop"].is_set():
+                    raise BMAServiceError("Fila BMA interrompida pelo usuário.")
+            try:
+                result = predicate()
+                if result:
+                    return result
+            except WebDriverException:
+                pass
+            sleep(0.5)
+        raise BMAServiceError(message)
+
+    def _wait_for_order(self, monitor_id, driver, wonum):
+        def loaded():
+            self._switch_to_manage_frame(driver)
+            return self._current_order_number(driver) == wonum
+
+        self._wait_until(monitor_id, loaded, f"A OT {wonum} não abriu no Maximo.")
+
+    def _save_current_order(self, driver):
+        self._switch_to_manage_frame(driver)
+        save = driver.find_element(By.ID, "toolactions_SAVE-tbb_anchor")
+        if not save.is_displayed() or not save.is_enabled():
+            raise BMAServiceError("O botão Salvar do Maximo não está disponível.")
+        self._click_when_idle(driver, save)
+
+    def _fill_general_dates(self, monitor_id, driver, order):
+        self._switch_to_manage_frame(driver)
+        self._click_tab(driver, "Ordem de Trabalho")
+        start = datetime.fromisoformat(order["planned_start"])
+        finish = datetime.fromisoformat(order["planned_finish"])
+        start_field = self._find_labeled_input(driver, "Início planejado")
+        finish_field = self._find_labeled_input(driver, "Final planejado")
+        if not start_field or not finish_field:
+            raise BMAServiceError(f"Campos de datas planejadas ausentes na OT {order['wonum']}.")
+        self._replace_input(start_field, start.strftime("%d/%m/%Y %H:%M"))
+        self._replace_input(finish_field, finish.strftime("%d/%m/%Y %H:%M"))
+        self._save_current_order(driver)
+
+        def dates_saved():
+            self._switch_to_manage_frame(driver)
+            self._click_tab(driver, "Ordem de Trabalho")
+            current_start = self._parse_maximo_datetime(
+                self._input_value(self._find_labeled_input(driver, "Início planejado")),
+            )
+            current_finish = self._parse_maximo_datetime(
+                self._input_value(self._find_labeled_input(driver, "Final planejado")),
+            )
+            return current_start == start and current_finish == finish
+
+        self._wait_until(monitor_id, dates_saved, f"As datas da OT {order['wonum']} não foram salvas.")
+
+    def _fill_assignments(self, monitor_id, driver, order):
+        self._switch_to_manage_frame(driver)
+        self._click_tab(driver, "Atribuições")
+        table, columns, rows = self._find_assignment_grid(driver)
+        while len(rows) < len(order["assignments"]):
+            previous_count = len(rows)
+            new_row = next((element for element in driver.find_elements(
+                By.CSS_SELECTOR, 'a[title="New Row"]',
+            ) if element.is_displayed() and element.is_enabled()), None)
+            if not new_row:
+                raise BMAServiceError(f"Não foi possível adicionar linha de atribuição na OT {order['wonum']}.")
+            new_row.click()
+            _, _, rows = self._wait_until(
+                monitor_id,
+                lambda: (grid if len(grid[2]) > previous_count else None)
+                if (grid := self._find_assignment_grid(driver)) else None,
+                f"A nova linha de atribuição não apareceu na OT {order['wonum']}.",
+            )
+            table, columns, rows = self._find_assignment_grid(driver)
+
+        for row, _ in rows[len(order["assignments"]):]:
+            delete_link = next((element for element in row.find_elements(
+                By.CSS_SELECTOR, 'a[title="Marcar a linha para excluir"]',
+            ) if element.is_displayed() and element.is_enabled()), None)
+            if not delete_link:
+                raise BMAServiceError(f"Não foi possível remover linha extra na OT {order['wonum']}.")
+            delete_link.click()
+
+        for (_, cells), assignment in zip(rows, order["assignments"]):
+            labor = self._assignment_input(cells, columns["mao de obra"])
+            planned_day = self._assignment_input(cells, columns["inicio planejado"])
+            hours = self._assignment_input(cells, columns["horas"])
+            if not labor or not planned_day or not hours:
+                raise BMAServiceError(f"Campos de atribuição incompletos na OT {order['wonum']}.")
+            laborcode = assignment["laborcode"].strip().upper()
+            assignment_start = datetime.combine(date.fromisoformat(assignment["dia"]), datetime.min.time()).replace(minute=1)
+            self._replace_input(labor, laborcode, select_suggestion=True)
+            self._replace_input(planned_day, assignment_start.strftime("%d/%m/%Y %H:%M"))
+            self._replace_input(hours, self._format_maximo_hours(assignment["horas"]))
+
+        self._save_current_order(driver)
+
+    def _verify_saved_order(self, monitor_id, driver, order):
+        expected_start = datetime.fromisoformat(order["planned_start"])
+        expected_finish = datetime.fromisoformat(order["planned_finish"])
+
+        def verified():
+            self._switch_to_manage_frame(driver)
+            self._click_tab(driver, "Ordem de Trabalho")
+            status = self._input_value(self._find_labeled_input(driver, "Status da OT"))
+            current_start = self._parse_maximo_datetime(
+                self._input_value(self._find_labeled_input(driver, "Início planejado")),
+            )
+            current_finish = self._parse_maximo_datetime(
+                self._input_value(self._find_labeled_input(driver, "Final planejado")),
+            )
+            if (status.casefold() != "prepared" or current_start != expected_start
+                    or current_finish != expected_finish):
+                return False
+
+            self._click_tab(driver, "Atribuições")
+            _, columns, rows = self._find_assignment_grid(driver)
+            if len(rows) != len(order["assignments"]):
+                return False
+            for (_, cells), assignment in zip(rows, order["assignments"]):
+                labor = self._input_value(self._assignment_input(cells, columns["mao de obra"]))
+                planned_day = self._parse_maximo_datetime(
+                    self._input_value(self._assignment_input(cells, columns["inicio planejado"])),
+                )
+                hours = self._parse_maximo_hours(
+                    self._input_value(self._assignment_input(cells, columns["horas"])),
+                )
+                expected_day = date.fromisoformat(assignment["dia"])
+                if (not labor.upper().startswith(assignment["laborcode"].upper()) or not planned_day
+                        or planned_day.date() != expected_day or hours is None
+                        or abs(hours - float(assignment["horas"])) > 1 / 60):
+                    return False
+            return True
+
+        self._wait_until(
+            monitor_id, verified,
+            f"Conferência falhou na OT {order['wonum']}: status, datas ou matrícula divergentes.",
+        )
+
+    def _open_order_in_maximo(self, monitor_id, driver, wonum):
+        driver.switch_to.default_content()
+        order_filter = self._find_order_filter(driver)
+        if not order_filter:
+            raise BMAServiceError("O campo Find Ordem de Trabalho não está disponível.")
+        self._submit_order_filter(order_filter, wonum)
+
+        self._open_order_result_in_maximo(monitor_id, driver, wonum)
+
+    def _open_order_result_in_maximo(self, monitor_id, driver, wonum):
+        def find_opened_order():
+            driver.switch_to.default_content()
+            if self._current_order_number_in_frames(driver) == wonum:
+                return True, None
+            link = self._find_order_link(driver, wonum)
+            return (False, link) if link else None
+
+        is_current_order, link = self._wait_until(
+            monitor_id, find_opened_order,
+            f"A OT {wonum} não foi encontrada no Maximo.",
+        )
+        if not is_current_order:
+            try:
+                link.click()
+            except WebDriverException:
+                driver.execute_script("arguments[0].click();", link)
+
+        def loaded():
+            driver.switch_to.default_content()
+            return self._current_order_number_in_frames(driver) == wonum
+
+        self._wait_until(monitor_id, loaded, f"A OT {wonum} não abriu no Maximo.")
+
+    def _process_order_queue(self, monitor_id, driver, orders):
+        completed = []
+        for index, order in enumerate(orders):
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if not session or session["stop"].is_set():
+                    return False
+            wonum = order["wonum"]
+            if index:
+                self._open_order_in_maximo(monitor_id, driver, wonum)
+            self._update(
+                monitor_id, current_order_index=index + 1, current_wonum=wonum,
+                opened_wonum=wonum, stage="saving_dates",
+                message=f"OT {wonum}: preenchendo início e final planejados.",
+            )
+            self._fill_general_dates(monitor_id, driver, order)
+            self._update(
+                monitor_id, stage="saving_assignments",
+                message=f"OT {wonum}: preenchendo matrículas em maiúsculas e salvando Atribuições.",
+            )
+            self._fill_assignments(monitor_id, driver, order)
+            self._update(monitor_id, stage="verifying", message=f"OT {wonum}: conferindo PREPARED, datas e matrículas.")
+            self._verify_saved_order(monitor_id, driver, order)
+            completed.append(wonum)
+            self._update(
+                monitor_id, completed_wonums=completed.copy(),
+                message=f"OT {wonum} conferida. {len(completed)} de {len(orders)} concluída(s).",
+            )
+        return True
+
     def _run(self, monitor_id: str, wonums: list[str]):
         driver = None
         started_at = monotonic()
@@ -364,7 +888,9 @@ class BmaPageMonitor:
             direct_navigation_attempted = False
             app_navigation_attempted = False
             opened_wonum = None
+            queue_completed = False
             login_clicked = False
+            filter_error = None
             while True:
                 with self._lock:
                     session = self._sessions.get(monitor_id)
@@ -410,8 +936,9 @@ class BmaPageMonitor:
                     )
                     try:
                         order_filter = self._find_order_filter(driver)
-                    except WebDriverException:
+                    except WebDriverException as exc:
                         order_filter = None
+                        filter_error = str(exc).strip()[:240] or type(exc).__name__
                     if order_filter or tracking_input_ready:
                         tracking_ready = True
                     if order_filter:
@@ -419,12 +946,13 @@ class BmaPageMonitor:
                             self._update(monitor_id, stage="filtering", message=(
                                 f"Filtrando a OT {wonums[0]} no rastreamento do Maximo."
                             ))
-                            order_filter.clear()
-                            order_filter.send_keys(wonums[0], Keys.ENTER)
+                            self._submit_order_filter(order_filter, wonums[0])
                             driver.switch_to.default_content()
                             query_submitted = True
-                        except WebDriverException:
+                            filter_error = None
+                        except WebDriverException as exc:
                             order_filter = None
+                            filter_error = str(exc).strip()[:240] or type(exc).__name__
                     if not query_submitted and not tracking_ready:
                         if (
                             not direct_navigation_attempted
@@ -466,11 +994,23 @@ class BmaPageMonitor:
                     self._update(monitor_id, stage="waiting_results", message=(
                         f"Aguardando resultados para {len(wonums)} OT(s)."
                     ))
-                    for wonum in wonums:
+                    driver.switch_to.default_content()
+                    try:
+                        self._switch_to_manage_frame(driver)
+                        current_wonum = self._current_order_number(driver)
+                    except WebDriverException:
+                        current_wonum = ""
+                    if current_wonum == wonums[0]:
+                        opened_wonum = wonums[0]
+                    else:
                         driver.switch_to.default_content()
-                        link = self._find_order_link(driver, wonum)
-                        if link:
-                            self._update(monitor_id, stage="opening_order", message=f"Abrindo a primeira OT selecionada: {wonum}.")
+                        for wonum in wonums:
+                            link = self._find_order_link(driver, wonum)
+                            if not link:
+                                continue
+                            self._update(monitor_id, stage="opening_order", message=(
+                                f"Abrindo a primeira OT selecionada: {wonum}."
+                            ))
                             try:
                                 link.click()
                             except WebDriverException:
@@ -478,10 +1018,27 @@ class BmaPageMonitor:
                                     driver.execute_script("arguments[0].click();", link)
                                 except WebDriverException:
                                     continue
-                            driver.switch_to.default_content()
                             opened_wonum = wonum
-                            self._update(monitor_id, opened_wonum=wonum)
                             break
+                    if opened_wonum:
+                        self._update(monitor_id, stage="opening_order", message=(
+                            f"OT {opened_wonum} localizada; aguardando carregar para iniciar o planejamento."
+                        ))
+                        self._wait_for_order(monitor_id, driver, opened_wonum)
+                        self._update(monitor_id, opened_wonum=opened_wonum, current_wonum=opened_wonum)
+                        with self._lock:
+                            session = self._sessions.get(monitor_id)
+                            queue_stopped = not session or session["stop"].is_set()
+                            orders = list(session["orders"]) if session else []
+                        if not queue_stopped:
+                            queue_completed = self._process_order_queue(monitor_id, driver, orders)
+                if queue_completed:
+                    self._update(
+                        monitor_id, status="completed", stage="completed",
+                        message=f"Fila concluída: {len(wonums)} OT(s) conferida(s). Firefox encerrado.",
+                        elapsed_seconds=round(monotonic() - started_at),
+                    )
+                    break
                 search_ready = any(field["id"] == "quicksearch" for field in fields)
                 self._update(
                     monitor_id,
@@ -489,8 +1046,14 @@ class BmaPageMonitor:
                     stage=("observing_order" if opened_wonum else "waiting_filter" if not query_submitted
                            else "waiting_results"),
                     message=(f"OT {opened_wonum} aberta. Observando os campos para orientar o preenchimento."
-                             if opened_wonum else "Rastreamento pronto; aguardando o campo de filtro de OT."
-                             if search_ready or tracking_ready else "Página aberta; aguardando os controles de rastreamento aparecerem."),
+                             if opened_wonum else
+                             f"Busca enviada; aguardando os resultados da OT {wonums[0]}."
+                             if query_submitted else
+                             f"Campo de filtro localizado, mas houve falha ao interagir: {filter_error}. Tentando novamente."
+                             if filter_error else
+                             "Campo de filtro detectado; tentando aplicar a busca."
+                             if search_ready or tracking_ready else
+                             "Página aberta; aguardando os controles de rastreamento aparecerem."),
                     fields=fields,
                     elapsed_seconds=round(monotonic() - started_at),
                     page_url=page_url,
@@ -498,7 +1061,12 @@ class BmaPageMonitor:
                 )
                 sleep(1)
         except Exception as exc:
-            self._update(monitor_id, status="failed", message=f"Monitor interrompido: {exc}")
+            state = self.get(monitor_id) or {}
+            self._update(
+                monitor_id, status="failed", stage="failed",
+                failed_wonum=state.get("current_wonum"),
+                message=f"Fila interrompida na OT {state.get('current_wonum') or 'atual'}: {exc}",
+            )
         finally:
             if driver:
                 try:
@@ -507,8 +1075,181 @@ class BmaPageMonitor:
                     pass
             with self._lock:
                 session = self._sessions.get(monitor_id)
-                if session and session["state"]["status"] != "failed":
+                if session and session["state"]["status"] not in {"failed", "completed"}:
                     session["state"].update(status="stopped", message="Monitor encerrado.")
+                if session:
+                    session["driver"] = None
+            self._browser_lock.release()
+
+    def _run_search_only(self, monitor_id: str, wonum: str):
+        self._run_read_only(monitor_id, wonum)
+
+    def _run_open_order_only(self, monitor_id: str, wonum: str):
+        driver = None
+        keep_browser_open = False
+        self._browser_lock.acquire()
+        try:
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if not session or session["stop"].is_set():
+                    return
+            service = BMAService()
+            self._update(monitor_id, message="Abrindo Rastreamento de Ordem no Firefox.", progress=10)
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = driver
+            driver.set_page_load_timeout(service.timeout)
+            try:
+                driver.get(WOTRACK_URL)
+            except TimeoutException:
+                pass
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["state"].update(
+                        status="completed",
+                        stage="opened",
+                        progress=100,
+                        message="Rastreamento de Ordem aberto no Firefox.",
+                        selected_wonums=[],
+                        queue_total=0,
+                        current_order_index=0,
+                        current_wonum=None,
+                        opened_wonum=None,
+                        page_url=driver.current_url,
+                        page_title=driver.title,
+                    )
+            keep_browser_open = True
+        except Exception as exc:
+            self._update(
+                monitor_id, status="failed", stage="failed",
+                message=f"Não foi possível abrir o Rastreamento de Ordem: {exc}",
+            )
+        finally:
+            if driver and not keep_browser_open:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session and not keep_browser_open:
+                    session["driver"] = None
+            self._browser_lock.release()
+
+    def _run_read_only(self, monitor_id: str, wonum: str, *, open_order=False):
+        driver = None
+        started_at = monotonic()
+        submitted = False
+        opened = False
+        self._browser_lock.acquire()
+        try:
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if not session or session["stop"].is_set():
+                    return
+            service = BMAService()
+            self._update(monitor_id, message="Iniciando Firefox para abrir a OT.", progress=10)
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = driver
+            driver.set_page_load_timeout(service.timeout)
+            try:
+                driver.get(WOTRACK_URL)
+            except TimeoutException:
+                pass
+            self._update(monitor_id, progress=25)
+
+            while True:
+                with self._lock:
+                    session = self._sessions.get(monitor_id)
+                    if not session or session["stop"].is_set():
+                        break
+                try:
+                    driver.switch_to.default_content()
+                    fields = self._visible_fields(driver)
+                except WebDriverException:
+                    fields = []
+                page_url = driver.current_url
+                page_title = driver.title
+                authenticated = not (
+                    "auth.rbmanca4" in page_url or "login-fed.michelin.com" in page_url
+                )
+                filter_error = None
+                if authenticated and not submitted:
+                    try:
+                        order_filter = self._find_order_filter(driver)
+                    except WebDriverException as exc:
+                        order_filter = None
+                        filter_error = str(exc).strip()[:240] or type(exc).__name__
+                    if order_filter:
+                        try:
+                            self._submit_order_filter(order_filter, wonum)
+                            driver.switch_to.default_content()
+                            submitted = True
+                            self._update(monitor_id, stage="search_submitted", progress=60)
+                        except WebDriverException as exc:
+                            filter_error = str(exc).strip()[:240] or type(exc).__name__
+                if open_order and submitted and not opened:
+                    self._update(
+                        monitor_id, stage="opening_order", progress=80,
+                        message=f"Abrindo a primeira OT: {wonum}.",
+                    )
+                    self._open_order_result_in_maximo(monitor_id, driver, wonum)
+                    opened = True
+                    self._update(
+                        monitor_id, status="monitoring", stage="opened", progress=100,
+                        opened_wonum=wonum, current_wonum=wonum,
+                        message=f"OT {wonum} aberta no Maximo. Nenhum dado foi alterado.",
+                    )
+                message = (
+                    f"OT {wonum} aberta no Maximo. Nenhum dado foi alterado."
+                    if opened else
+                    f"OT {wonum} enviada no filtro. Aguardando o resultado para abrir."
+                    if submitted and open_order else
+                    f"OT {wonum} enviada no filtro. A busca está aberta; nenhum resultado foi aberto ou alterado."
+                    if submitted else
+                    "Conclua o login/MFA na janela Firefox; a busca será enviada ao aparecer o rastreamento."
+                    if not authenticated else
+                    f"Aguardando o campo de busca do Rastreamento de Ordem de Trabalho para inserir {wonum}."
+                )
+                if filter_error:
+                    message = f"Não foi possível inserir a OT no filtro: {filter_error}"
+                self._update(
+                    monitor_id,
+                    status="monitoring",
+                    stage="opened" if opened else "search_submitted" if submitted else "waiting_filter",
+                    progress=100 if opened else 60 if submitted else 30,
+                    message=message,
+                    fields=fields,
+                    elapsed_seconds=round(monotonic() - started_at),
+                    current_order_index=0,
+                    current_wonum=wonum,
+                    opened_wonum=wonum if opened else None,
+                    page_url=page_url,
+                    page_title=page_title,
+                )
+                sleep(1)
+        except Exception as exc:
+            self._update(
+                monitor_id, status="failed", stage="failed",
+                failed_wonum=wonum,
+                message=f"Busca somente leitura interrompida: {exc}",
+            )
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session and session["state"]["status"] not in {"failed", "completed"}:
+                    session["state"].update(status="stopped", message="Busca somente leitura encerrada.")
                 if session:
                     session["driver"] = None
             self._browser_lock.release()

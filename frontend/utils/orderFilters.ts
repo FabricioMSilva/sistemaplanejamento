@@ -18,6 +18,7 @@ export const orderColumns: ColumnDef[] = [
   { key: "assetnum", label: "Equipamento", kind: "text", placeholder: "equip…" },
   { key: "status", label: "Status da OT", kind: "select" },
   { key: "worktype", label: "Tipo de trabalho", kind: "select" },
+  { key: "planning_status", label: "Planejamento BMA", kind: "select" },
   { key: "maintenanceshop", label: "Setor de manutenção", kind: "select" },
 ];
 
@@ -28,6 +29,23 @@ export type OrderFilters = {
 
 export const emptyFilters: OrderFilters = { text: {}, select: {} };
 
+export function planningStatus(order: OrdemTrabalho): "Planejada" | "Parcial" | "Não planejada" | "Não verificada" {
+  const storedStatus = order.planning_status ?? order.dados.planning_status;
+  if (["Planejada", "Parcial", "Não planejada", "Não verificada"].includes(String(storedStatus)))
+    return String(storedStatus) as ReturnType<typeof planningStatus>;
+  const hasLead = !!cellText(order, "lead").trim();
+  const hasScheduledStart = !!cellText(order, "schedstart").trim();
+  if (hasLead && hasScheduledStart) return "Planejada";
+  if (hasLead || hasScheduledStart) return "Parcial";
+  const leadKnown = Object.prototype.hasOwnProperty.call(order.dados, "lead")
+    || (order.lead !== undefined && order.lead !== null);
+  return leadKnown ? "Não planejada" : "Não verificada";
+}
+
+export function hasExistingPlanningInfo(order: OrdemTrabalho): boolean {
+  return planningStatus(order) !== "Não planejada";
+}
+
 export function countActiveFilters(filters: OrderFilters): number {
   return (
     Object.values(filters.text).filter((value) => value.trim()).length +
@@ -36,6 +54,7 @@ export function countActiveFilters(filters: OrderFilters): number {
 }
 
 export function cellText(order: OrdemTrabalho, key: string): string {
+  if (key === "planning_status") return planningStatus(order);
   const value = order.dados[key] ?? order[key as keyof OrdemTrabalho];
   if (value === null || value === undefined) return "";
   if (typeof value === "object") {
@@ -47,6 +66,12 @@ export function cellText(order: OrdemTrabalho, key: string): string {
 
 export function getWorkType(order: OrdemTrabalho): string {
   return cellText(order, "worktype").trim().toUpperCase();
+}
+
+export function isCorrectiveAvailable(order: OrdemTrabalho): boolean {
+  const status = String(order.status || cellText(order, "status")).trim().toUpperCase();
+  return getWorkType(order) === "E" && (
+    (status === "PREPARED" && !cellText(order, "schedstart").trim()) || status === "WFSCH" || status === "WSCH");
 }
 
 function selectValue(order: OrdemTrabalho, key: string): string {

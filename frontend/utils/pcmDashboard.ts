@@ -1,6 +1,6 @@
 import type { CalendarioTurnos, MaoDeObra, OrdemTrabalho, PlanejamentoEquipe } from "@/services/api";
 import { chaveExecutante, horasExecutante, periodoValido } from "@/utils/laborPlanning";
-import { cellText, getWorkType } from "@/utils/orderFilters";
+import { cellText, getWorkType, hasExistingPlanningInfo, isCorrectiveAvailable, planningStatus } from "@/utils/orderFilters";
 
 export const numberFormat = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
 export const formatNumber = (value: number | null) => value === null ? "—" : numberFormat.format(value);
@@ -123,6 +123,9 @@ export function buildDashboard(
   }
   const grouping = [...locations].sort((a, b) => b[1] - a[1])[0];
   const averageCapacity = availableHours !== null && days.length ? availableHours / days.length : null;
+  const pmCandidates = pending.filter(isPreventiveOrder);
+  const availablePm = pmCandidates.filter((order) => !hasExistingPlanningInfo(order));
+  const pmAlreadyPlannedExcluded = pmCandidates.filter((order) => ["Planejada", "Parcial"].includes(planningStatus(order))).length;
   return {
     pending, sectorPending, periodFilterActive, team, validTeam, availableHours, neededHours, missingHours, daily,
     disciplines: [...disciplines.values()].sort((a, b) => b.hours - a.hours),
@@ -130,9 +133,12 @@ export function buildDashboard(
     backlogDays: averageCapacity && missingHours === 0 ? neededHours / averageCapacity : null,
     availability: labor && labor.total > 0 && validTeam ? team.length / labor.total * 100 : null,
     adjustments: team.reduce((sum, row) => sum + row.member.ajuste_horas, 0),
-    pm: portfolio(pending.filter(isPreventiveOrder), ["I", "S"]),
+    pm: portfolio(availablePm, ["I", "S"]),
+    pmAllRows: pmCandidates,
     pmExcluded: pending.filter((order) => ["I", "S"].includes(getWorkType(order)) && !isPreventiveOrder(order)).length,
-    corrective: portfolio(sectorPending, ["E"]),
+    pmAlreadyPlannedExcluded,
+    pmUnverifiedExcluded: pmCandidates.filter((order) => planningStatus(order) === "Não verificada").length,
+    corrective: portfolio(sectorPending.filter(isCorrectiveAvailable), ["E"]),
   };
 }
 export type PcmData = ReturnType<typeof buildDashboard>;

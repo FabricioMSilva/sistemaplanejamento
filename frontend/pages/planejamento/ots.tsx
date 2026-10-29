@@ -85,11 +85,11 @@ export default function PlanejamentoOtsPage() {
     [orders, samePeriod, savedTeam, labor, calendar, inicio, fim]);
   const canPlan = samePeriod && !teamError && !capacityError && data.validTeam;
   const canDefineTeam = !loading && !teamError && sectors.length > 0 && periodoValido(inicio, fim);
-  const modeOrders = mode === "pm" ? data.pm.rows : data.corrective.rows;
+  const modeOrders = mode === "pm" ? data.pmAllRows : data.corrective.rows;
   const latestSync = orders.reduce((latest, order) => order.sincronizado_em > latest ? order.sincronizado_em : latest, "");
   const syncDate = latestSync ? new Date(latestSync) : null;
 
-  async function openPlanning(selected: PlanningMode | "revisao") {
+  async function openPlanning(selected: PlanningMode) {
     setActionBusy(true); setError("");
     try {
       const plan = await createWorkPlan(sectors);
@@ -146,7 +146,7 @@ export default function PlanejamentoOtsPage() {
         {savedTeam && (savedTeam.inicio !== inicio || savedTeam.fim !== fim) && <p className="mb-4 text-sm text-amber-300">Período alterado. Revise e salve a mão de obra para liberar as carteiras.</p>}
         {samePeriod && !loading && !data.validTeam && !capacityError && <p role="alert" className="mb-4 text-sm text-amber-300">Há pendências na equipe salva. Revise o cadastro, as funções e os dias disponíveis para liberar o planejamento.</p>}
         {message && <p role="status" className="mb-4 text-sm text-emerald-300">{message}</p>}
-        <PcmCommandCenter data={data} orders={data.pending} inicio={inicio} fim={fim}
+        <PcmCommandCenter data={data} orders={data.pending} inicio={inicio} fim={fim} calendario={calendar}
           setInicio={(value) => { setInicio(value); setMessage(""); }} setFim={(value) => { setFim(value); setMessage(""); }}
           canPlan={canPlan} canDefineTeam={canDefineTeam} teamLoading={loading} teamError={teamError}
           loading={loading} savedTeam={savedTeam} mode={mode} onMode={setMode}

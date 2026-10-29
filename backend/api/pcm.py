@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from models.database import listar_situacao_envios_bma
 from services import pcm_planning as pcm
 from services.nfe_report import export_synced_report
 from services.log_service import registrar_log
@@ -12,7 +13,11 @@ page_monitor = BmaPageMonitor()
 
 
 class BmaPageMonitorRequest(BaseModel):
-    orders: list["BmaOrderPlanRequest"] = Field(min_length=1, max_length=1)
+    orders: list["BmaOrderPlanRequest"] = Field(min_length=1, max_length=100)
+
+
+class BmaPageSearchRequest(BaseModel):
+    wonum: str = Field(min_length=1, max_length=32)
 
 
 class BmaLaborAssignmentRequest(BaseModel):
@@ -46,6 +51,50 @@ def execute(operation, *args):
 def start_bma_page_monitor(payload: BmaPageMonitorRequest):
     try:
         return page_monitor.start([order.dict() for order in payload.orders])
+    except BMAServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/bma-page-monitor/search", status_code=202)
+def start_bma_page_search(payload: BmaPageSearchRequest):
+    try:
+        return page_monitor.start_search(payload.wonum)
+    except BMAServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/bma-page-monitor/open-order", status_code=202)
+def open_bma_page_order(payload: BmaPageSearchRequest):
+    try:
+        return page_monitor.start_open_order(payload.wonum)
+    except BMAServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/bma-page-monitor/abrir-ot", status_code=202)
+def open_order_in_bma(payload: BmaPageSearchRequest):
+    try:
+        return page_monitor.abrir_ot_bma(payload.wonum)
+    except BMAServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/planos/{plan_id}/envios-bma")
+def bma_send_status(plan_id: str):
+    return listar_situacao_envios_bma(plan_id)
+
+
+@router.post("/bma-page-monitor/observar", status_code=202)
+def observe_bma_page():
+    return page_monitor.iniciar_observacao()
+
+
+@router.post("/planos/{plan_id}/enviar-planejamento", status_code=202)
+def send_planning_to_bma(plan_id: str):
+    try:
+        return page_monitor.enviar_planejamento(plan_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except BMAServiceError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
