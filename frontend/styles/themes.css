@@ -1,0 +1,268 @@
+/*
+ * Design system Planning & Scheduling Michelin.
+ * Todas as cores vivem aqui como canais RGB ("R G B") para suportar opacidade no Tailwind (ex.: bg-primary/20).
+ * Componentes usam tokens semânticos; as escalas legadas (slate, sky, navy, white...) também apontam para o tema
+ * para que as telas existentes acompanhem os três temas sem alterar sua lógica.
+ */
+
+:root {
+  /* Paleta oficial Michelin */
+  --michelin-blue: 39 80 155;        /* #27509B */
+  --michelin-dark-blue: 0 32 91;     /* #00205B */
+  --michelin-yellow: 252 229 0;      /* #FCE500 */
+  --michelin-green: 132 189 0;       /* #84BD00 */
+  --michelin-gray: 83 86 90;         /* #53565A */
+  --michelin-white: 255 255 255;
+  --michelin-black: 0 0 0;
+
+  --radius: 0.75rem;
+  --theme-transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease,
+    box-shadow 180ms ease, fill 180ms ease;
+}
+
+/* ───────────── Michelin Professional (padrão): claro, cabeçalho azul, amarelo nos destaques ───────────── */
+:root,
+[data-theme="michelin-professional"] {
+  color-scheme: light;
+  --background: 241 244 249;
+  --foreground: 10 28 64;
+  --surface: 255 255 255;
+  --surface-elevated: 255 255 255;
+  --card: 255 255 255;
+  --card-foreground: 10 28 64;
+  --primary: var(--michelin-blue);
+  --primary-foreground: 255 255 255;
+  --secondary: 230 236 246;
+  --secondary-foreground: 0 32 91;
+  --accent: var(--michelin-yellow);
+  --accent-foreground: 0 32 91;
+  --muted: 236 240 246;
+  --muted-foreground: 83 86 90;
+  --border: 214 222 235;
+  --input: 203 213 230;
+  --ring: var(--michelin-blue);
+  --success: 74 138 0;
+  --warning: 176 120 0;
+  --danger: 196 43 52;
+  --info: var(--michelin-blue);
+  --chart-1: var(--michelin-blue);
+  --chart-2: 252 196 0;
+  --chart-3: 74 138 0;
+  --chart-4: 0 32 91;
+  --chart-5: 120 132 150;
+  --header: var(--michelin-blue);
+  --header-foreground: 255 255 255;
+  --shadow-color: 0 32 91;
+  --shadow-strength: 0.08;
+
+  /* Escalas legadas: no tema claro, "white" vira tinta escura e "slate" claro vira texto escuro. */
+  --white: 0 32 91;
+  --black: 0 32 91;
+  --slate-100: 15 23 42;
+  --slate-200: 20 33 61;
+  --slate-300: 40 52 78;
+  --slate-400: 72 82 99;
+  --slate-500: 96 104 117;
+  --slate-600: 130 138 150;
+  --slate-950: 241 244 249;
+  --sky-100: 0 32 91;
+  --sky-200: 0 45 120;
+  --sky-300: 31 70 145;
+  --sky-400: 39 80 155;
+  --sky-500: 39 80 155;
+  --navy-950: 241 244 249;
+  --navy-900: 255 255 255;
+  --navy-800: 230 236 246;
+  --navy-700: 214 222 235;
+  --accent-300: 252 229 0;
+  --accent-400: 252 229 0;
+  --accent-500: 240 210 0;
+  --emerald-100: 30 70 0;
+  --emerald-200: 45 95 0;
+  --emerald-300: 60 120 0;
+  --emerald-400: 74 138 0;
+  --amber-100: 92 60 0;
+  --amber-200: 120 80 0;
+  --amber-300: 150 100 0;
+  --amber-400: 196 140 0;
+  --rose-100: 110 20 30;
+  --rose-200: 140 25 38;
+  --rose-300: 170 32 45;
+  --rose-400: 196 43 52;
+  --rose-500: 210 50 60;
+  --rose-950: 255 241 242;
+  --violet-300: 90 60 160;
+  --violet-400: 110 75 190;
+  --surface-sunken: 246 248 252;
+}
+
+/* ───────────── Command Center: escuro azul-marinho para uso prolongado ───────────── */
+[data-theme="command-center"] {
+  color-scheme: dark;
+  --background: 5 16 38;
+  --foreground: 230 236 246;
+  --surface: 10 27 58;
+  --surface-elevated: 14 36 74;
+  --card: 11 30 63;
+  --card-foreground: 230 236 246;
+  --primary: 86 140 230;
+  --primary-foreground: 255 255 255;
+  --secondary: 20 44 88;
+  --secondary-foreground: 220 230 246;
+  --accent: var(--michelin-yellow);
+  --accent-foreground: 0 32 91;
+  --muted: 18 40 80;
+  --muted-foreground: 150 166 190;
+  --border: 40 70 120;
+  --input: 46 78 130;
+  --ring: 110 160 240;
+  --success: 132 189 0;
+  --warning: 252 229 0;
+  --danger: 248 113 113;
+  --info: 110 160 240;
+  --chart-1: 110 160 240;
+  --chart-2: 252 229 0;
+  --chart-3: 132 189 0;
+  --chart-4: 167 139 250;
+  --chart-5: 148 163 184;
+  --header: var(--michelin-dark-blue);
+  --header-foreground: 255 255 255;
+  --shadow-color: 0 0 0;
+  --shadow-strength: 0.32;
+
+  --white: 255 255 255;
+  --black: 0 0 0;
+  --slate-100: 241 245 249;
+  --slate-200: 226 232 240;
+  --slate-300: 203 213 225;
+  --slate-400: 160 174 196;
+  --slate-500: 120 136 160;
+  --slate-600: 90 106 130;
+  --slate-950: 5 16 38;
+  --sky-100: 224 236 255;
+  --sky-200: 190 214 250;
+  --sky-300: 150 188 245;
+  --sky-400: 110 160 240;
+  --sky-500: 86 140 230;
+  --navy-950: 5 16 38;
+  --navy-900: 10 27 58;
+  --navy-800: 14 36 74;
+  --navy-700: 22 50 98;
+  --accent-300: 253 236 77;
+  --accent-400: 252 229 0;
+  --accent-500: 235 212 0;
+  --emerald-100: 236 252 203;
+  --emerald-200: 210 240 150;
+  --emerald-300: 170 220 70;
+  --emerald-400: 132 189 0;
+  --amber-100: 254 249 195;
+  --amber-200: 253 240 140;
+  --amber-300: 252 229 0;
+  --amber-400: 240 200 0;
+  --rose-100: 255 228 230;
+  --rose-200: 254 205 211;
+  --rose-300: 253 164 175;
+  --rose-400: 248 113 113;
+  --rose-500: 239 68 68;
+  --rose-950: 76 5 25;
+  --violet-300: 196 181 253;
+  --violet-400: 167 139 250;
+  --surface-sunken: 7 20 46;
+}
+
+/* ───────────── Executive Light: branco minimalista para reuniões e análise ───────────── */
+[data-theme="executive-light"] {
+  color-scheme: light;
+  --background: 250 251 252;
+  --foreground: 17 24 39;
+  --surface: 255 255 255;
+  --surface-elevated: 255 255 255;
+  --card: 255 255 255;
+  --card-foreground: 17 24 39;
+  --primary: var(--michelin-blue);
+  --primary-foreground: 255 255 255;
+  --secondary: 243 245 248;
+  --secondary-foreground: 17 24 39;
+  --accent: var(--michelin-yellow);
+  --accent-foreground: 0 32 91;
+  --muted: 244 246 249;
+  --muted-foreground: 83 86 90;
+  --border: 226 230 236;
+  --input: 214 220 228;
+  --ring: var(--michelin-blue);
+  --success: 74 138 0;
+  --warning: 170 115 0;
+  --danger: 190 40 50;
+  --info: var(--michelin-blue);
+  --chart-1: var(--michelin-blue);
+  --chart-2: 230 190 0;
+  --chart-3: 74 138 0;
+  --chart-4: 83 86 90;
+  --chart-5: 156 163 175;
+  --header: 255 255 255;
+  --header-foreground: 0 32 91;
+  --shadow-color: 17 24 39;
+  --shadow-strength: 0.04;
+
+  --white: 17 24 39;
+  --black: 17 24 39;
+  --slate-100: 17 24 39;
+  --slate-200: 31 41 55;
+  --slate-300: 55 65 81;
+  --slate-400: 83 86 90;
+  --slate-500: 107 114 128;
+  --slate-600: 140 146 156;
+  --slate-950: 250 251 252;
+  --sky-100: 0 32 91;
+  --sky-200: 0 45 120;
+  --sky-300: 31 70 145;
+  --sky-400: 39 80 155;
+  --sky-500: 39 80 155;
+  --navy-950: 250 251 252;
+  --navy-900: 255 255 255;
+  --navy-800: 243 245 248;
+  --navy-700: 226 230 236;
+  --accent-300: 252 229 0;
+  --accent-400: 252 229 0;
+  --accent-500: 240 210 0;
+  --emerald-100: 30 70 0;
+  --emerald-200: 45 95 0;
+  --emerald-300: 60 120 0;
+  --emerald-400: 74 138 0;
+  --amber-100: 92 60 0;
+  --amber-200: 120 80 0;
+  --amber-300: 150 100 0;
+  --amber-400: 190 135 0;
+  --rose-100: 110 20 30;
+  --rose-200: 140 25 38;
+  --rose-300: 170 32 45;
+  --rose-400: 190 40 50;
+  --rose-500: 205 48 58;
+  --rose-950: 255 241 242;
+  --violet-300: 90 60 160;
+  --violet-400: 110 75 190;
+  --surface-sunken: 247 248 250;
+}
+
+html.theme-ready body,
+html.theme-ready .pcm-panel,
+html.theme-ready .pcm-small-button,
+html.theme-ready .pcm-primary-button,
+html.theme-ready .pcm-allocation-dock {
+  transition: var(--theme-transition);
+}
+
+html[data-reduced-motion="true"] *,
+html[data-reduced-motion="true"] *::before,
+html[data-reduced-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-ready body,
+  html.theme-ready .pcm-panel {
+    transition: none;
+  }
+}

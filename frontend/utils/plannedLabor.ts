@@ -1,5 +1,5 @@
 import type { OrdemTrabalho } from "@/services/api";
-import type { Requirement, WorkPlan } from "@/services/pcm";
+import type { BmaPreparationRequirement, Requirement, WorkPlan } from "@/services/pcm";
 
 function fieldText(value: unknown): string {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -13,9 +13,35 @@ export function plannedLabor(order: OrdemTrabalho) {
   const raw = order.dados.wplabor;
   if (!Array.isArray(raw)) return [];
   return raw.filter((row): row is Record<string, unknown> => row !== null && typeof row === "object" && !Array.isArray(row))
-    .map((row) => ({ craft: fieldText(row.craft).trim(), orgid: fieldText(row.orgid).trim(),
-      quantity: fieldText(row.quantity), hours: fieldText(row.laborhrs), skill: fieldText(row.skilllevel) }))
+    .map((row) => ({ craft: fieldText(row.craft ?? row.especialidade ?? row.craftid ?? row.specialty).trim(), orgid: fieldText(row.orgid),
+      quantity: fieldText(row.quantity ?? row.quantidade ?? row.requiredquantity),
+      hours: fieldText(row.laborhrs ?? row["horas normais"] ?? row.horas_normais ?? row.hours), skill: fieldText(row.skilllevel) }))
     .filter((row) => row.craft);
+}
+
+export function preparationRequirements(order: OrdemTrabalho): BmaPreparationRequirement[] {
+  return plannedLabor(order).map((row) => ({
+    especialidade: row.craft,
+    orgid: row.orgid,
+    quantidade: Number(row.quantity) || 0,
+    horas_normais: row.hours,
+  }));
+}
+
+export function underAllocatedPreparationOrders(plan: WorkPlan) {
+  const scheduled = new Set(plan.blocos.map((block) => block.ot));
+  return [...scheduled].flatMap((key) => {
+    const order = plan.ordens.find((item) => `${item.siteid}:${item.wonum}` === key);
+    if (!order) return [];
+    const requirements = preparationRequirements(order);
+    const collectedPeople = requirements.reduce((sum, row) => sum + Math.max(0, row.quantidade), 0);
+    const requiredCount = collectedPeople || Number(plan.requisitos[key]?.pessoas) || 0;
+    const assignedCount = new Set(plan.blocos.filter((block) => block.ot === key)
+      .flatMap((block) => block.executantes)).size;
+    return requiredCount > assignedCount
+      ? [{ order, requirements, requiredCount, assignedCount, missingCount: requiredCount - assignedCount }]
+      : [];
+  });
 }
 
 export function plannedBmaOrders(plan: WorkPlan) {
@@ -79,7 +105,6 @@ export function missingPlanningData(order: OrdemTrabalho): string[] {
   const missing: string[] = [];
   if (!positive(order.dados.estdur) && !positive(order.dados.estlabhrs)) missing.push("duração estimada");
   const labor = plannedLabor(order);
-  if (!labor.length) missing.push("especialidade");
   if (!labor.some((row) => positive(row.quantity))) missing.push("quantidade de mão de obra");
   return missing;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listarMaoDeObra, obterCalendarioTurnos, salvarEquipe, type CalendarioTurnos, type MaoDeObra, type PlanejamentoEquipe } from "@/services/api";
+import { listarMaoDeObra, obterCalendarioTurnos, salvarEquipe, salvarEquipeNomeada, type CalendarioTurnos, type MaoDeObra, type PlanejamentoEquipe } from "@/services/api";
 import {
   chaveExecutante, configuracaoInicial, configurarDiasDisponiveis, horasExecutante, resolvePlannerIdentity, escalaPeriodo,
   type ConfiguracaoExecutante, type Profissional,
@@ -24,11 +24,16 @@ const buttonClass = "rounded border border-white/20 px-3 py-2 text-sm text-accen
 
 export default function LaborPlanningModal({ inicio, fim, setores, saved, onClose, onSave, onLaborUpdate, persistTeam }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const nameDialog = useRef<HTMLDialogElement>(null);
   const [data, setData] = useState<MaoDeObra | null>(null);
   const [calendar, setCalendar] = useState<CalendarioTurnos | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [step, setStep] = useState(1);
+  const [teamNameOpen, setTeamNameOpen] = useState(false);
+  const [teamName, setTeamName] = useState("");
+  const [appliedSavedTeamName, setAppliedSavedTeamName] = useState("");
   const [toolsBusy, setToolsBusy] = useState(false);
   const [planejador, setPlanejador] = useState(saved?.planejador ?? "");
   const [attempt, setAttempt] = useState(0);
@@ -47,6 +52,12 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
     if (!saved?.planejador) setPlanejador(localStorage.getItem("pcm-planejador") ?? "");
     return () => { element?.close(); document.body.style.overflow = oldOverflow; };
   }, []);
+
+  useEffect(() => {
+    const element = nameDialog.current;
+    if (teamNameOpen && element && !element.open) element.showModal();
+    else if (!teamNameOpen && element?.open) element.close();
+  }, [teamNameOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -151,8 +162,53 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
     onLaborUpdate(result);
   }
 
-  async function save() {
-    if (pending.length || !planejador.trim() || toolsBusy) return;
+  function advance() {
+    setError("");
+    if (step === 1) {
+      if (!data?.sincronizado_em) {
+        setError("Atualize a mão de obra antes de continuar.");
+        return;
+      }
+      if (data.verificacao_nf?.necessaria && !data.verificacao_nf.verificada) {
+        setError("Atualize e confira os ativos do SharePoint antes de continuar.");
+        return;
+      }
+      setStep(2);
+      return;
+    }
+    if (!available.length) {
+      setError("Selecione ao menos um executante para continuar.");
+      return;
+    }
+    setStep(3);
+  }
+
+  async function saveNamedTeam() {
+    if (!teamName.trim() || pending.length || !planejador.trim() || toolsBusy) return;
+    setSaving(true);
+    setError("");
+    try {
+      const canonicalPlanner = resolvePlannerIdentity(planejador, data?.profissionais ?? []);
+      const plan = currentPlan(canonicalPlanner);
+      if (persistTeam) {
+        await persistTeam(plan);
+        await salvarEquipeNomeada(teamName.trim(), plan, false);
+      } else {
+        await salvarEquipeNomeada(teamName.trim(), plan);
+      }
+      setPlanejador(canonicalPlanner);
+      localStorage.setItem("pcm-planejador", canonicalPlanner);
+      setTeamNameOpen(false);
+      onSave(plan);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Falha ao salvar a equipe.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function useSavedTeam() {
+    if (!appliedSavedTeamName || pending.length || !planejador.trim() || toolsBusy || saving) return;
     setSaving(true);
     setError("");
     try {
@@ -164,11 +220,17 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
       localStorage.setItem("pcm-planejador", canonicalPlanner);
       onSave(plan);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Falha ao salvar a equipe.");
+      setError(err instanceof Error ? err.message : "Falha ao aplicar a equipe salva.");
     } finally {
       setSaving(false);
     }
   }
+
+  const stageNames = ["Cadastro e conferência", "Seleção do efetivo", "Disponibilidade e capacidade"];
+  const nextDisabled = saving || toolsBusy || loading
+    || (step === 1 && (!data?.sincronizado_em
+      || (data.verificacao_nf?.necessaria && !data.verificacao_nf.verificada)))
+    || (step === 2 && !available.length);
 
   return (
     <dialog ref={dialog} onCancel={(event) => { event.preventDefault(); if (!saving && !toolsBusy) onClose(); }}
@@ -176,18 +238,38 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
       className="max-h-[94vh] w-[96vw] max-w-7xl overflow-y-auto rounded-xl border border-white/20 bg-navy-900 p-5 text-slate-200 backdrop:bg-black/70">
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h2 id="labor-modal-title" className="text-xl font-semibold text-white">{persistTeam ? "Editar mão de obra deste planejamento" : "Definir mão de obra disponível"}</h2>
-          <p className="mt-1 text-sm">Período: {inicio.split("-").reverse().join("/")} a {fim.split("-").reverse().join("/")} (inclusive).</p>
+          <h2 id="labor-modal-title" className="text-xl font-semibold text-white">{step === 1 ? "Definir mão de obra" : step === 2 ? "Selecionar efetivo" : "Dias disponíveis e capacidade"}</h2>
+          <p className="mt-1 text-sm">Etapa {step} de 3 · {stageNames[step - 1]}</p>
+          <p className="mt-1 text-xs text-slate-400">Período: {inicio.split("-").reverse().join("/")} a {fim.split("-").reverse().join("/")} (inclusive).</p>
         </div>
-        <button type="button" onClick={onClose} disabled={saving || toolsBusy} className={buttonClass}>Cancelar</button>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          {step > 1 && <button type="button" onClick={() => { setError(""); setStep((current) => current - 1); }} disabled={saving || toolsBusy} className={buttonClass}>Voltar</button>}
+          <button type="button" onClick={onClose} disabled={saving || toolsBusy} className={buttonClass}>Cancelar</button>
+          {step < 3 ? <button type="button" onClick={advance} disabled={nextDisabled}
+            className="rounded bg-accent-400 px-3 py-2 text-sm font-semibold text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40">Próximo</button>
+            : appliedSavedTeamName ? <>
+              <button type="button" onClick={() => void useSavedTeam()}
+                disabled={saving || toolsBusy || pending.length > 0 || !planejador.trim()}
+                className="rounded bg-accent-400 px-3 py-2 text-sm font-semibold text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40">{saving ? "Aplicando equipe..." : "Aplicar equipe salva"}</button>
+            </> : <button type="button" onClick={() => { setTeamName(""); setError(""); setTeamNameOpen(true); }}
+              disabled={saving || toolsBusy || pending.length > 0 || !planejador.trim()}
+              className="rounded bg-accent-400 px-3 py-2 text-sm font-semibold text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40">Salvar equipe</button>}
+        </div>
       </div>
-      <LaborPlanningTools setores={setores} planejador={planejador} setPlanejador={setPlanejador}
+      <ol className="mb-5 grid grid-cols-3 gap-2 text-[10px] sm:text-xs" aria-label="Etapas da definição de equipe">
+        {stageNames.map((name, index) => <li key={name} aria-current={step === index + 1 ? "step" : undefined}
+          className={`border-b-2 px-1 pb-2 ${step === index + 1 ? "border-accent-400 text-white" : "border-white/10 text-slate-500"}`}>
+          <span className="mr-1">0{index + 1}</span>{name}
+        </li>)}
+      </ol>
+      {step === 1 && <LaborPlanningTools setores={setores} planejador={planejador} setPlanejador={setPlanejador}
         profissionais={data?.profissionais ?? []}
         plan={currentPlan} valid={!loading && !pending.length && available.length > 0}
-        disabled={saving || loading} onApply={(plan) => {
+        disabled={saving || loading} onApply={(plan, savedTeamName) => {
           setAvailable(reutilizarEquipe(plan, inicio, fim).map((member) => configurarDiasDisponiveis(member, inicio, fim)));
+          setAppliedSavedTeamName(savedTeamName ?? "");
           setCheckedAvailable([]); setCheckedTotal([]); setError("");
-        }} onChanged={refreshLabor} onBusy={setToolsBusy} />
+        }} onChanged={refreshLabor} onBusy={setToolsBusy} />}
       {error && <p role="alert" className="mb-4 text-rose-300">{error}</p>}
       {loading ? <p>Carregando efetivo...</p> : !data ? (
         <button type="button" onClick={() => setAttempt((value) => value + 1)} className={buttonClass}>Tentar novamente</button>
@@ -195,19 +277,19 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
         <p className="text-amber-300">Use “Atualizar mão de obra” neste modal para carregar o efetivo do BMA.</p>
       ) : (
         <>
-          <p className="mb-4 text-xs text-slate-400">
+          {step === 1 && <p className="mb-4 text-xs text-slate-400">
             {setores.some((sector) => sector.toUpperCase() === "RES-TC-NF")
               ? "NF: cadastro RES do BMA cruzado com os ativos da ListaFuncionario do SharePoint, sem filtro de setor/local no BMA."
               : `Inclui setor(es) ${setores.join(", ")} ou local de trabalho NFE.`} Atualizado em {new Intl.DateTimeFormat("pt-BR", {
               dateStyle: "short", timeStyle: "short", timeZone: "America/Sao_Paulo",
             }).format(new Date(data.sincronizado_em))} (Brasília). A disponibilidade é definida manualmente.
-          </p>
-          {data.verificacao_nf?.necessaria && <p className="mb-4 text-sm text-amber-200">
+          </p>}
+          {step === 1 && data.verificacao_nf?.necessaria && <p className="mb-4 text-sm text-amber-200">
             {data.verificacao_nf.verificada
               ? `Ativos conferidos no SharePoint. ${data.verificacao_nf.pendentes} pessoa(s) sem vínculo, não incluídas no efetivo; confira acima.`
               : "NF ainda não conferido no SharePoint. Atualize a mão de obra e confirme os vínculos para selecionar somente ativos."}
           </p>}
-          <fieldset disabled={saving || toolsBusy}>
+          {step === 2 && <fieldset disabled={saving || toolsBusy}>
             <div className="grid gap-4 md:grid-cols-[1fr_auto_1fr]">
               <div>
                 <label htmlFor="labor-total" className="font-semibold">Efetivo total ({total.length})</label>
@@ -245,6 +327,8 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
                 </select>
               </div>
             </div>
+          </fieldset>}
+          {step === 3 && <fieldset disabled={saving || toolsBusy}>
             <h3 className="mb-2 mt-6 font-semibold">Dias disponíveis e capacidade de cada executante</h3>
             <p className="mb-3 text-xs text-slate-400">
               Marque os dias em que cada integrante poderá trabalhar. Cada dia marcado equivale a 8 horas disponíveis para atividades.
@@ -323,24 +407,41 @@ export default function LaborPlanningModal({ inicio, fim, setores, saved, onClos
                 </tbody>
               </table>
             </div>
-          </fieldset>
-          {pending.length > 0 && <p role="status" className="my-3 text-sm text-amber-300">
+          </fieldset>}
+          {step === 3 && pending.length > 0 && <p role="status" className="my-3 text-sm text-amber-300">
             {pending.length} executante(s) pendente(s): confirme cadastro ativo, função e dias disponíveis. Eles não estão incluídos no somatório.
           </p>}
-          <section className="my-5 rounded border border-white/10 p-4" aria-label="Somatório de horas por função">
+          {step === 3 && <section className="my-5 rounded border border-white/10 p-4" aria-label="Somatório de horas por função">
             <h3 className="mb-2 font-semibold">H×H disponível por função {pending.length ? "(parcial)" : ""}</h3>
             {[...summary].map(([key, row]) => <p key={key} className="text-sm">
               {row.label}: {row.count} executante(s) — <strong>{row.hours.toLocaleString("pt-BR")} H×H</strong>
             </p>)}
             <p className="mt-2 font-semibold" aria-live="polite">Total: {totalHours.toLocaleString("pt-BR")} H×H</p>
-          </section>
-          {!planejador.trim() && <p className="mb-3 text-sm text-amber-200">Informe o planejador para salvar e identificar este planejamento.</p>}
-          <button type="button" disabled={saving || toolsBusy || pending.length > 0 || !planejador.trim() || (data.verificacao_nf?.necessaria && !data.verificacao_nf.verificada)}
-            onClick={save} className="rounded bg-accent-400 px-4 py-2 font-semibold text-navy-950 disabled:opacity-40">
-            {saving ? "Salvando..." : persistTeam ? "Atualizar equipe deste planejamento" : "Salvar período e equipe"}
-          </button>
+          </section>}
+          {step === 3 && !planejador.trim() && <p className="mb-3 text-sm text-amber-200">Informe o planejador para salvar e identificar este planejamento.</p>}
         </>
       )}
+      <dialog ref={nameDialog} aria-labelledby="team-name-title"
+        onCancel={(event) => { event.preventDefault(); setTeamNameOpen(false); }}
+        className="w-[min(30rem,calc(100vw-2rem))] rounded-lg border border-white/15 bg-navy-900 p-5 text-slate-200 backdrop:bg-black/70">
+        <form onSubmit={(event) => { event.preventDefault(); void saveNamedTeam(); }}>
+          <h3 id="team-name-title" className="text-lg font-semibold text-white">Salvar equipe</h3>
+          <p className="mt-1 text-sm text-slate-400">Dê um nome para reutilizar esta equipe em próximos planejamentos do mesmo setor.</p>
+          <label htmlFor="saved-team-name" className="mt-4 block text-sm">Nome da equipe
+            <input id="saved-team-name" autoFocus required maxLength={80} value={teamName}
+              onChange={(event) => setTeamName(event.target.value)} disabled={saving}
+              className={`${inputClass} mt-1 block w-full`} />
+          </label>
+          {error && <p role="alert" className="mt-3 text-sm text-rose-300">{error}</p>}
+          <div className="mt-5 flex justify-end gap-2">
+            <button type="button" onClick={() => setTeamNameOpen(false)} disabled={saving} className={buttonClass}>Cancelar</button>
+            <button type="submit" disabled={saving || !teamName.trim() || pending.length > 0 || !planejador.trim()}
+              className="rounded bg-accent-400 px-3 py-2 text-sm font-semibold text-accent-foreground disabled:cursor-not-allowed disabled:opacity-40">
+              {saving ? "Salvando..." : "Salvar equipe"}
+            </button>
+          </div>
+        </form>
+      </dialog>
     </dialog>
   );
 }

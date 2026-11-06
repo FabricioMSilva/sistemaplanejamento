@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   atualizarMaoDeObra, listarHistoricoEquipe, obterConferenciaNf, obterEquipePadrao,
-  obterSincronizacao, salvarEquipePadrao, salvarVinculoNf,
-  type ConferenciaNf, type HistoricoEquipe, type PlanejamentoEquipe,
+  listarEquipesSalvas, obterSincronizacao, salvarEquipePadrao, salvarVinculoNf,
+  type ConferenciaNf, type EquipeSalva, type HistoricoEquipe, type PlanejamentoEquipe,
 } from "@/services/api";
 import { chaveExecutante, formatPlannerIdentity, searchPlannerPeople, type Profissional } from "@/utils/laborPlanning";
 import { normalize } from "@/utils/orderFilters";
@@ -11,7 +11,7 @@ type Props = {
   setores: string[]; planejador: string; setPlanejador: (value: string) => void;
   profissionais: Profissional[];
   plan: () => PlanejamentoEquipe; valid: boolean; disabled: boolean;
-  onApply: (plan: PlanejamentoEquipe) => void;
+  onApply: (plan: PlanejamentoEquipe, savedTeamName?: string) => void;
   onChanged: () => Promise<void>; onBusy: (busy: boolean) => void;
 };
 const explain = (error: unknown) => error instanceof Error ? error.message : "Falha de comunicação.";
@@ -19,13 +19,16 @@ const explain = (error: unknown) => error instanceof Error ? error.message : "Fa
 export default function LaborPlanningTools(props: Props) {
   const { setores } = props;
   const [history, setHistory] = useState<HistoricoEquipe[]>([]);
+  const [savedTeams, setSavedTeams] = useState<EquipeSalva[]>([]);
   const [nf, setNf] = useState<ConferenciaNf | null>(null);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [historyId, setHistoryId] = useState("");
+  const [savedTeamName, setSavedTeamName] = useState("");
   const [linkChoices, setLinkChoices] = useState<Record<number, string>>({});
+  const [linkSearch, setLinkSearch] = useState<Record<number, string>>({});
   const isNf = setores.some((sector) => sector.toUpperCase() === "RES-TC-NF");
   const disabled = busy || props.disabled;
   const plannerMatches = searchPlannerPeople(props.planejador, props.profissionais);
@@ -34,8 +37,14 @@ export default function LaborPlanningTools(props: Props) {
   });
   useEffect(() => {
     let cancelled = false;
-    Promise.all([listarHistoricoEquipe(setores), isNf ? obterConferenciaNf(setores) : Promise.resolve(null)])
-      .then(([rows, result]) => { if (!cancelled) { setHistory(rows); setNf(result); } })
+    Promise.all([
+      listarHistoricoEquipe(setores),
+      isNf ? obterConferenciaNf(setores) : Promise.resolve(null),
+      listarEquipesSalvas(setores),
+    ])
+      .then(([rows, result, teams]) => {
+        if (!cancelled) { setHistory(rows); setNf(result); setSavedTeams(teams); }
+      })
       .catch((reason: unknown) => { if (!cancelled) setError(explain(reason)); });
     return () => { cancelled = true; };
   }, [setores, isNf]);
@@ -134,9 +143,28 @@ export default function LaborPlanningTools(props: Props) {
         if (row) { props.onApply(row.planejamento); setMessage("Equipe histórica aplicada como rascunho. Dias disponíveis são mantidos no mesmo período; para outro período, segunda a sexta vêm marcados. Revise antes de salvar."); }
       }}>Reutilizar equipe</button>
     </div>
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="min-w-56 flex-1 text-xs text-slate-300">Equipes nomeadas · compartilhadas por setor
+        <select aria-label="Equipes salvas" disabled={disabled} value={savedTeamName}
+          onChange={(event) => setSavedTeamName(event.target.value)}
+          className="mt-1 block w-full rounded border border-white/20 bg-navy-950 p-2 text-sm">
+          <option value="">Selecione uma equipe salva</option>
+          {savedTeams.map((team) => <option key={team.nome} value={team.nome}>
+            {team.nome} · {team.planejamento.executantes.length} executantes · {new Date(team.salvo_em).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}
+          </option>)}
+        </select>
+      </label>
+      <button type="button" disabled={disabled || !savedTeamName} className="pcm-small-button" onClick={() => {
+        const team = savedTeams.find((item) => item.nome === savedTeamName);
+        if (team) {
+          props.onApply(team.planejamento, team.nome);
+          setMessage(`Equipe “${team.nome}” carregada. Revise a capacidade e aplique ao planejamento atual.`);
+        }
+      }}>Aplicar equipe</button>
+    </div>
     {isNf && <details className="rounded border border-sky-400/20 p-3">
       <summary className="cursor-pointer text-sm text-sky-200">Conferência de ativos NF · {nf?.verificada ? `${nf.vinculados.length} vinculados / ${nf.pendentes.length} pendentes` : "Atualização necessária"}</summary>
-      <p className="my-2 text-xs text-slate-400">Somente pessoas presentes na lista SharePoint e vinculadas ao BMA entram no efetivo. Nomes abreviados não são associados automaticamente. Confirme a identidade antes de vincular; a função e a matrícula continuam vindo do BMA.</p>
+      <p className="my-2 text-xs text-slate-400">Somente pessoas presentes na lista SharePoint e vinculadas ao BMA entram no efetivo. A busca inclui todas as gerências do worksite RES; nomes abreviados não são associados automaticamente. Confirme a identidade antes de vincular; a função e a matrícula continuam vindo do BMA.</p>
       {nf?.verificada && <div className="max-h-72 space-y-2 overflow-y-auto">
         {[...nf.pendentes, ...nf.vinculados].map((row) => {
           const linked = nf.vinculados.find((item) => item.id === row.id);
@@ -148,20 +176,37 @@ export default function LaborPlanningTools(props: Props) {
             return tokens.length >= 2 && tokens.every((token) => full.has(token));
           });
           const suggestedKeys = new Set(suggestions.map(chaveExecutante));
+          const searchTokens = normalize(linkSearch[row.id] ?? "").split(" ").filter(Boolean);
+          const filteredCandidates = nf.candidatos.filter((person) => {
+            const searchable = normalize([person.nome, person.matricula, person.setor, person.local_trabalho].join(" "));
+            return searchTokens.every((token) => searchable.includes(token));
+          });
+          const selectedCandidate = nf.candidatos.find((person) => chaveExecutante(person) === choice);
+          if (selectedCandidate && !filteredCandidates.some((person) => chaveExecutante(person) === choice)) {
+            filteredCandidates.unshift(selectedCandidate);
+          }
+          const visibleSuggestions = filteredCandidates.filter((person) => suggestedKeys.has(chaveExecutante(person)));
+          const visibleOthers = filteredCandidates.filter((person) => !suggestedKeys.has(chaveExecutante(person)));
           return <label key={row.id} className="grid gap-2 border-t border-white/10 py-2 text-xs sm:grid-cols-2">
             <span>{row.nome} <span className={linked ? "text-emerald-300" : "text-amber-300"}>{linked ? `· ${linked.matricula_bma}` : "· sem vínculo, não incluído"}</span></span>
-            <span className="flex min-w-0 flex-wrap gap-2">
+            <span className="grid min-w-0 gap-2">
+              <input type="search" aria-label={`Filtrar candidatos BMA para ${row.nome}`}
+                placeholder="Filtrar por nome, matrícula, setor ou local"
+                value={linkSearch[row.id] ?? ""} disabled={disabled}
+                onChange={(event) => setLinkSearch((current) => ({ ...current, [row.id]: event.target.value }))}
+                className="min-w-0 rounded border border-white/20 bg-navy-950 p-2 text-xs" />
+              <span className="flex min-w-0 flex-wrap gap-2">
               <select aria-label={`Vínculo BMA de ${row.nome}`} disabled={disabled}
                 value={choice} onChange={(event) => setLinkChoices((current) => ({ ...current, [row.id]: event.target.value }))}
                 className="min-w-0 flex-1 rounded border border-white/20 bg-navy-950 p-2">
                 <option value="">Selecione a pessoa correspondente no BMA</option>
-                {suggestions.length > 0 && <optgroup label="Possíveis correspondências por nome — confirme a identidade">
-                  {suggestions.map((person) => <option key={chaveExecutante(person)} value={chaveExecutante(person)}>
+                <optgroup label="Possíveis correspondências por nome — confirme a identidade">
+                  {visibleSuggestions.map((person) => <option key={chaveExecutante(person)} value={chaveExecutante(person)}>
                     {person.nome} ({person.matricula}) · {person.setor} / {person.local_trabalho}
                   </option>)}
-                </optgroup>}
-                <optgroup label="Demais candidatos BMA da unidade RES">
-                  {nf.candidatos.filter((person) => !suggestedKeys.has(chaveExecutante(person))).map((person) => <option key={chaveExecutante(person)} value={chaveExecutante(person)}>
+                </optgroup>
+                <optgroup label="Demais candidatos BMA ativos de RES · todas as gerências">
+                  {visibleOthers.map((person) => <option key={chaveExecutante(person)} value={chaveExecutante(person)}>
                     {person.nome} ({person.matricula}) · {person.setor} / {person.local_trabalho}
                   </option>)}
                 </optgroup>
@@ -169,10 +214,16 @@ export default function LaborPlanningTools(props: Props) {
               <button type="button" className="pcm-small-button" disabled={disabled || !choice || choice === currentKey} onClick={() => {
                 const person = nf.candidatos.find((candidate) => chaveExecutante(candidate) === choice);
                 if (person) void action(async () => {
-                  setNf(await salvarVinculoNf(setores, row.id, person.orgid, person.matricula));
+                  const updated = await salvarVinculoNf(setores, row.id, person.orgid, person.matricula);
+                  setNf(updated);
+                  if (!updated.vinculados.some((item) => item.id === row.id
+                    && item.orgid === person.orgid && item.matricula_bma === person.matricula)) {
+                    throw new Error("O vínculo foi gravado, mas não foi aplicado ao efetivo. Atualize a conferência e tente novamente.");
+                  }
                   await props.onChanged(); setMessage(`Vínculo confirmado para ${row.nome}.`);
                 });
               }}>Confirmar vínculo</button>
+              </span>
             </span>
           </label>;
         })}

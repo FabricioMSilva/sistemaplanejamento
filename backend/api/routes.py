@@ -1,8 +1,7 @@
-import json
 from threading import Lock
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from models.database import (
@@ -11,6 +10,7 @@ from models.database import (
     get_connection,
     listar_ordens_trabalho,
     listar_alteracoes_ordens_trabalho,
+    listar_historico_ots,
     listar_mao_de_obra,
     listar_especialidades,
     obter_ultima_sincronizacao,
@@ -20,15 +20,15 @@ from models.database import (
     salvar_equipe,
     upsert_ordens_trabalho,
     listar_historico,
+    listar_equipes_salvas,
     equipe_padrao,
     conferencia_nf,
     salvar_vinculo_nf,
+    salvar_equipe_nomeada,
 )
 from services.BMAService import BMAConfigurationError, BMAService, BMAServiceError
-from services.excel_service import InvalidSpreadsheetError, processar_planilha
 from services.log_service import listar_logs, registrar_log
 from services.labor_planning import PlanejamentoEquipe, calcular_equipe, calendario_turnos
-from utils.validators import INVALID_FILE_MESSAGE
 
 router = APIRouter()
 bma_service = BMAService()
@@ -61,6 +61,29 @@ def gravar_equipe(payload: PlanejamentoEquipe):
 @router.get("/planejamento/historico")
 def historico_equipes(setor: list[str] = Query(min_length=1, max_length=28)):
     return listar_historico(setor)
+
+
+@router.get("/planejamento/equipes-salvas")
+def equipes_salvas(setor: list[str] = Query(min_length=1, max_length=28)):
+    return listar_equipes_salvas(setor)
+
+
+class EquipeNomeadaPayload(BaseModel):
+    nome: str = Field(min_length=1, max_length=80)
+    planejamento: PlanejamentoEquipe
+    persistir_atual: bool = True
+
+
+@router.put("/planejamento/equipes-salvas")
+def gravar_equipe_nomeada(payload: EquipeNomeadaPayload):
+    try:
+        if not payload.planejamento.planejador.strip():
+            raise ValueError("Informe o nome/matrícula do planejador.")
+        calcular_equipe(payload.planejamento, listar_mao_de_obra(payload.planejamento.setores))
+        data = payload.planejamento.model_dump(mode="json")
+        return salvar_equipe_nomeada(data, payload.nome, persistir_atual=payload.persistir_atual)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/planejamento/equipe-padrao")
@@ -107,11 +130,6 @@ def gravar_vinculo_nf(payload: VinculoNfPayload):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-class CriarOtsPayload(BaseModel):
-    arquivo_id: int
-    indices: list[int] = Field(min_length=1)
-
-
 class SincronizarOtsPayload(BaseModel):
     setores: list[str] = Field(min_length=1, max_length=28)
 
@@ -128,7 +146,10 @@ def _executar_sincronizacao(job_id: str, setores: list[str]) -> None:
         )
 
     try:
-        records = bma_service.listar_ots_por_setor(setores, progress=report)
+        existing_orders = listar_ordens_trabalho(setores)
+        records = bma_service.listar_ots_por_setor(
+            setores, progress=report, existing_orders=existing_orders,
+        )
         atualizar_sincronizacao(
             job_id,
             status="saving",
@@ -206,71 +227,6 @@ def atualizar_mao_de_obra(payload: SincronizarOtsPayload, background_tasks: Back
 @router.get("/health")
 def health():
     return {"status": "online", "sistema": "RoboMario"}
-
-
-@router.post("/processar")
-async def processar(arquivo: UploadFile = File(...)):
-    if not arquivo.filename:
-        raise HTTPException(status_code=400, detail=INVALID_FILE_MESSAGE)
-
-    try:
-        conteudo = await arquivo.read()
-        resultado = processar_planilha(arquivo.filename, conteudo)
-        return resultado
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except InvalidSpreadsheetError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        registrar_log(f"Erro inesperado: {exc}", nivel="error", nome_arquivo=arquivo.filename)
-        raise HTTPException(status_code=500, detail="Falha ao processar o arquivo.") from exc
-
-
-@router.post("/criar-ots")
-def criar_ots(payload: CriarOtsPayload):
-    with get_connection() as conn:
-        arquivo = conn.execute(
-            """
-            SELECT id, nome_arquivo, json_resultado
-            FROM arquivos_processados
-            WHERE id = ?
-            """,
-            (payload.arquivo_id,),
-        ).fetchone()
-
-    if not arquivo:
-        raise HTTPException(status_code=404, detail="Arquivo processado não encontrado.")
-
-    try:
-        registros = json.loads(arquivo["json_resultado"] or "[]")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail="JSON do arquivo processado está inválido.") from exc
-
-    indices_invalidos = [index for index in payload.indices if index < 0 or index >= len(registros)]
-    if indices_invalidos:
-        raise HTTPException(status_code=400, detail="Uma ou mais linhas selecionadas são inválidas.")
-
-    selecionados = [registros[index] for index in payload.indices]
-    try:
-        resultado = bma_service.criar_ot(selecionados)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    mensagem = resultado.get(
-        "mensagem",
-        f"{len(selecionados)} OT(s) enviada(s) para criação.",
-    )
-    registrar_log(
-        mensagem,
-        nome_arquivo=arquivo["nome_arquivo"],
-        quantidade_processada=len(selecionados),
-    )
-    return {
-        "quantidade": len(selecionados),
-        "indices": payload.indices,
-        "status": resultado.get("status", "solicitado"),
-        "mensagem": mensagem,
-    }
 
 
 @router.post("/planejamento/sincronizar", status_code=202)
@@ -368,3 +324,12 @@ def historico():
 @router.get("/logs")
 def logs():
     return listar_logs()
+
+
+@router.get("/historico-ots")
+def historico_ots(
+    busca: str = Query(default="", max_length=120),
+    tipo: str = Query(default="todas", max_length=20),
+    limite: int = Query(default=500, ge=1, le=500),
+):
+    return listar_historico_ots(busca, tipo, limite)

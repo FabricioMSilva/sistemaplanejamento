@@ -16,6 +16,7 @@ from reportlab.platypus import (
 )
 
 from services.pcm_planning import mode_for, order_key, text
+from utils.runtime_paths import resource_root
 
 BLUE = colors.HexColor("#003B80")
 NAVY = colors.HexColor("#00245D")
@@ -27,7 +28,7 @@ GREEN = colors.HexColor("#19794A")
 ORANGE = colors.HexColor("#A56800")
 RED = colors.HexColor("#B83B38")
 WEEKDAYS = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
-BRAND_IMAGE = Path(__file__).resolve().parents[1] / "assets" / "LogoMichelin-transparente.png"
+BRAND_IMAGE = resource_root() / "backend" / "assets" / "LogoMichelin-transparente.png"
 
 
 def number(value):

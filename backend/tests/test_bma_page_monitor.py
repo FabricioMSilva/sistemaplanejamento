@@ -1,10 +1,11 @@
 import unittest
 import os
 import tempfile
+from threading import Event
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import ElementClickInterceptedException, WebDriverException
 from selenium.webdriver.common.keys import Keys
 from api.pcm import (
     BmaOrderPlanRequest, BmaPageMonitorRequest, BmaPageSearchRequest,
@@ -25,6 +26,99 @@ def planned_order(wonum):
 
 
 class BmaPageMonitorTests(unittest.TestCase):
+    def test_click_scrolls_element_into_view_and_retries_interception(self):
+        driver = Mock()
+        element = Mock()
+        element.click.side_effect = [ElementClickInterceptedException("covered"), None]
+
+        with patch.object(BmaPageMonitor, "_wait_maximo_idle"), \
+             patch("services.bma_page_monitor.sleep"):
+            BmaPageMonitor._click_when_idle(driver, element)
+
+        self.assertEqual(driver.execute_script.call_count, 2)
+        driver.execute_script.assert_called_with(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", element,
+        )
+        self.assertEqual(element.click.call_count, 2)
+
+    def test_replace_input_focuses_field_when_table_filter_intercepts(self):
+        driver = Mock()
+        element = Mock()
+        element.parent = driver
+        driver.execute_script.return_value = True
+
+        with patch.object(
+            BmaPageMonitor, "_click_when_idle",
+            side_effect=ElementClickInterceptedException("blocked by input.tablefilterfield"),
+        ), patch.object(BmaPageMonitor, "_wait_maximo_idle"):
+            BmaPageMonitor._replace_input(
+                element, "03/11/2026 00:01", focus_on_table_filter_interception=True,
+            )
+
+        driver.execute_script.assert_called_once()
+        element.send_keys.assert_any_call("03/11/2026 00:01")
+
+    def test_replace_input_does_not_focus_through_other_interceptions(self):
+        driver = Mock()
+        element = Mock()
+        element.parent = driver
+
+        with patch.object(
+            BmaPageMonitor, "_click_when_idle",
+            side_effect=ElementClickInterceptedException("blocked by modal overlay"),
+        ), patch.object(BmaPageMonitor, "_wait_maximo_idle"):
+            with self.assertRaises(ElementClickInterceptedException):
+                BmaPageMonitor._replace_input(
+                    element, "03/11/2026 00:01", focus_on_table_filter_interception=True,
+                )
+
+        driver.execute_script.assert_not_called()
+        element.send_keys.assert_not_called()
+
+    def test_replace_input_confirms_focus_before_typing_in_assignment_field(self):
+        driver = Mock()
+        element = Mock()
+        element.parent = driver
+        driver.execute_script.return_value = False
+
+        with patch.object(BmaPageMonitor, "_click_when_idle"), \
+             patch.object(BmaPageMonitor, "_wait_maximo_idle"):
+            with self.assertRaisesRegex(BMAServiceError, "Não foi possível focar"):
+                BmaPageMonitor._replace_input(
+                    element, "B111132", focus_on_table_filter_interception=True,
+                )
+
+        driver.execute_script.assert_called_once()
+        element.send_keys.assert_not_called()
+
+    def test_save_confirmation_clicks_yes_and_records_acknowledgement(self):
+        driver = Mock()
+        driver._bma_messages = []
+        yes = Mock()
+        driver.execute_script.return_value = {
+            "code": "BMXAA2300I",
+            "text": "Mensagem do Sistema BMXAA2300I - Deseja salvar as mudanças antes de continuar? Cancelar Não Sim",
+            "yes": yes,
+        }
+
+        self.assertTrue(BmaPageMonitor._handle_maximo_message(driver))
+
+        yes.click.assert_called_once_with()
+        self.assertEqual(driver._bma_messages, ["BMXAA2300I respondida com Sim"])
+
+    def test_unrecognized_maximo_message_is_not_confirmed(self):
+        driver = Mock()
+        yes = Mock()
+        driver.execute_script.return_value = {
+            "code": "BMXAA2300I", "text": "Mensagem do Sistema BMXAA2300I - Confirmar ação?",
+            "yes": yes,
+        }
+
+        with self.assertRaisesRegex(BMAServiceError, "Confirmar ação"):
+            BmaPageMonitor._handle_maximo_message(driver)
+
+        yes.click.assert_not_called()
+
     def test_read_only_search_submits_number_without_opening_or_editing_order(self):
         monitor = BmaPageMonitor()
         with patch("services.bma_page_monitor.Thread") as thread:
@@ -77,6 +171,337 @@ class BmaPageMonitorTests(unittest.TestCase):
         self.assertEqual(state["selected_wonums"], ["RES6707859"])
         self.assertEqual(thread.call_args.kwargs["target"], monitor._run_open_order_only)
 
+    def test_ronda_sharepoint_starts_read_only_worker(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_ronda_sharepoint()
+
+        state = monitor.get(result["monitor_id"])
+        self.assertEqual(state["mode"], "ronda_sharepoint")
+        self.assertTrue(state["inspection_only"])
+        self.assertEqual(state["ronda_items"], [])
+        self.assertEqual(thread.call_args.kwargs["target"], monitor._run_ronda_sharepoint)
+
+    def test_ronda_creation_pause_and_resume_updates_monitor_state(self):
+        monitor = BmaPageMonitor()
+        resume = Event()
+        resume.set()
+        monitor._sessions["run-1"] = {
+            "state": {"monitor_id": "run-1", "mode": "ronda_creation", "status": "monitoring"},
+            "stop": Event(), "pause": Event(), "resume": resume, "driver": None,
+        }
+
+        paused = monitor.pause_ronda_creation("run-1")
+        self.assertEqual(paused["status"], "pausing")
+        self.assertTrue(monitor._sessions["run-1"]["pause"].is_set())
+        self.assertFalse(resume.is_set())
+
+        resumed = monitor.resume_ronda_creation("run-1")
+        self.assertEqual(resumed["status"], "monitoring")
+        self.assertFalse(monitor._sessions["run-1"]["pause"].is_set())
+        self.assertTrue(resume.is_set())
+
+    def test_monitor_keeps_only_recent_progress_events(self):
+        monitor = BmaPageMonitor()
+        monitor._sessions["run-1"] = {"state": {"monitor_id": "run-1"}}
+
+        for index in range(10):
+            monitor._update("run-1", stage="filling_order", message=f"Etapa {index}")
+
+        events = monitor.get("run-1")["events"]
+        self.assertEqual(len(events), 8)
+        self.assertEqual(events[0]["message"], "Etapa 2")
+        self.assertEqual(events[-1]["message"], "Etapa 9")
+
+    def test_ronda_excel_export_starts_monitored_worker(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_ronda_excel_export()
+
+        state = monitor.get(result["monitor_id"])
+        self.assertEqual(state["mode"], "ronda_excel_export")
+        self.assertEqual(state["status"], "starting")
+        self.assertEqual(thread.call_args.kwargs["target"], monitor._run_ronda_excel_export)
+
+    def test_ronda_worker_keeps_unmatched_items_out_of_creation_list(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_ronda_sharepoint()
+        monitor_id = result["monitor_id"]
+        target = thread.call_args.kwargs["target"]
+        args = thread.call_args.kwargs["args"]
+        driver = Mock()
+        service = Mock(timeout=30, login_timeout=600)
+        service._create_browser.return_value = driver
+        eligible = {"id": 1, "ronda": "Diária", "executantes": [{"nome": "Pessoa", "matricula": "E1"}]}
+        blocked = {"id": 2, "ronda": "Semanal", "executantes": [{"nome": "Sem cadastro", "matricula": None}]}
+
+        with (
+            patch("services.bma_page_monitor.BMAService", return_value=service),
+            patch("services.bma_page_monitor.listar_mao_de_obra", return_value={"profissionais": []}),
+            patch("services.bma_page_monitor.coletar_ots_ronda", return_value={
+                "pendentes": [eligible], "bloqueadas": [blocked], "funcionarios": [],
+            }),
+            patch("services.bma_page_monitor.salvar_funcionarios_ronda", return_value=0),
+            patch("services.bma_page_monitor.salvar_itens_ronda_sharepoint", return_value=2) as save_snapshot,
+            patch("services.bma_page_monitor.listar_funcionarios_ronda", return_value=[]),
+        ):
+            target(*args)
+
+        state = monitor.get(monitor_id)
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["ronda_items"], [eligible])
+        self.assertEqual(state["ronda_items_bloqueados"], [blocked])
+        self.assertEqual(state["queue_total"], 2)
+        self.assertEqual(state["ronda_counts"], {"Diária": 1, "Semanal": 1})
+        save_snapshot.assert_called_once_with([eligible, blocked])
+        self.assertEqual(state["ronda_itens_salvos"], 2)
+        self.assertIn("1 bloqueada(s)", state["message"])
+        driver.quit.assert_called_once_with()
+
+    def test_ronda_creation_starts_only_prepared_eligible_orders(self):
+        monitor = BmaPageMonitor()
+        items = [{"id": 71, "ronda": "Análise química"}]
+        prepared = {"orders": [
+            {"sharepoint_ids": [71], "ronda": "Análise química"},
+            {"sharepoint_ids": [72], "ronda": "Ronda de equipamentos"},
+        ], "waiting": []}
+
+        with (
+            patch("services.bma_page_monitor.listar_itens_ronda_para_criacao", return_value=items),
+            patch("services.bma_page_monitor.prepare_ronda_orders", return_value=prepared),
+            patch("services.bma_page_monitor.iniciar_criacao_ronda") as reserve,
+            patch("services.bma_page_monitor.Thread") as thread,
+        ):
+            result = monitor.start_ronda_creation(limit=1)
+
+        state = monitor.get(result["monitor_id"])
+        self.assertEqual(state["mode"], "ronda_creation")
+        self.assertEqual(state["queue_total"], 1)
+        reserve.assert_called_once_with([71])
+        self.assertEqual(thread.call_args.kwargs["target"], monitor._run_ronda_creation)
+        self.assertEqual(thread.call_args.kwargs["args"][1], prepared["orders"][:1])
+        self.assertEqual(state["ronda_remaining"], 1)
+
+    def test_ronda_creation_worker_records_each_success_without_opening_real_bma(self):
+        monitor = BmaPageMonitor()
+        order = {"sharepoint_ids": [71], "ronda": "Análise química"}
+        prepared = {"orders": [order], "waiting": []}
+        with (
+            patch("services.bma_page_monitor.listar_itens_ronda_para_criacao", return_value=[{"id": 71}]),
+            patch("services.bma_page_monitor.prepare_ronda_orders", return_value=prepared),
+            patch("services.bma_page_monitor.iniciar_criacao_ronda"),
+            patch("services.bma_page_monitor.Thread") as thread,
+        ):
+            monitor_id = monitor.start_ronda_creation()["monitor_id"]
+
+        target = thread.call_args.kwargs["target"]
+        args = thread.call_args.kwargs["args"]
+        driver = Mock(current_url="https://workspace.example/quickrep", title="Quick Report")
+        service = Mock(timeout=30)
+        service._create_browser.return_value = driver
+
+        def create_order(_driver, _order, *, on_number, on_saved, on_completed, on_progress):
+            on_number("RES1234567")
+            on_progress("Título preenchido.")
+            on_saved("RES1234567")
+            on_completed("RES1234567")
+            return "RES1234567"
+
+        with (
+            patch("services.bma_page_monitor.BMAService", return_value=service),
+            patch("services.bma_page_monitor.create_ronda_work_order", side_effect=create_order) as create,
+            patch("services.bma_page_monitor.registrar_numero_ot_ronda") as save_number_generated,
+            patch("services.bma_page_monitor.marcar_ot_ronda_salva") as save_order,
+            patch("services.bma_page_monitor.registrar_ot_ronda_criada") as save_number,
+            patch("services.bma_page_monitor.registrar_historico_ot") as history,
+            patch("services.bma_page_monitor.falhar_criacao_ronda") as mark_failed,
+        ):
+            target(*args)
+
+        state = monitor.get(monitor_id)
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["current_wonum"], "RES1234567")
+        self.assertEqual(state["ronda_ots_criadas"][0]["numero_ot"], "RES1234567")
+        create.assert_called_once()
+        self.assertEqual(create.call_args.args, (driver, order))
+        self.assertEqual(set(create.call_args.kwargs), {"on_number", "on_saved", "on_completed", "on_progress"})
+        save_number_generated.assert_called_once_with([71], "RES1234567")
+        save_order.assert_called_once_with([71], "RES1234567")
+        save_number.assert_called_once_with([71], "RES1234567")
+        history.assert_called_once()
+        mark_failed.assert_not_called()
+        driver.quit.assert_called_once_with()
+
+    def test_ronda_creation_failure_keeps_browser_until_explicit_stop(self):
+        monitor = BmaPageMonitor()
+        order = {"sharepoint_ids": [71], "ronda": "Análise química"}
+        prepared = {"orders": [order], "waiting": []}
+        with (
+            patch("services.bma_page_monitor.listar_itens_ronda_para_criacao", return_value=[{"id": 71}]),
+            patch("services.bma_page_monitor.prepare_ronda_orders", return_value=prepared),
+            patch("services.bma_page_monitor.iniciar_criacao_ronda"),
+            patch("services.bma_page_monitor.Thread") as thread,
+        ):
+            monitor_id = monitor.start_ronda_creation()["monitor_id"]
+
+        target = thread.call_args.kwargs["target"]
+        args = thread.call_args.kwargs["args"]
+        driver = Mock(current_url="https://workspace.example/quickrep", title="Quick Report")
+        service = Mock(timeout=30)
+        service._create_browser.return_value = driver
+
+        with (
+            patch("services.bma_page_monitor.BMAService", return_value=service),
+            patch("services.bma_page_monitor.create_ronda_work_order", side_effect=RuntimeError("Falha antes do número")),
+            patch("services.bma_page_monitor.falhar_criacao_ronda"),
+        ):
+            target(*args)
+
+        state = monitor.get(monitor_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("Firefox ficará aberto", state["message"])
+        driver.quit.assert_not_called()
+        self.assertIs(monitor._sessions[monitor_id]["driver"], driver)
+        self.assertTrue(monitor._browser_lock.locked())
+
+        stopped = monitor.stop(monitor_id)
+        self.assertEqual(stopped["status"], "stopped")
+        driver.quit.assert_called_once_with()
+        self.assertFalse(monitor._browser_lock.locked())
+
+    def test_ronda_creation_failure_releases_lock_when_firefox_window_is_gone(self):
+        monitor = BmaPageMonitor()
+        order = {"sharepoint_ids": [71], "ronda": "Análise química"}
+        prepared = {"orders": [order], "waiting": []}
+        with (
+            patch("services.bma_page_monitor.listar_itens_ronda_para_criacao", return_value=[{"id": 71}]),
+            patch("services.bma_page_monitor.prepare_ronda_orders", return_value=prepared),
+            patch("services.bma_page_monitor.iniciar_criacao_ronda"),
+            patch("services.bma_page_monitor.Thread") as thread,
+        ):
+            monitor_id = monitor.start_ronda_creation()["monitor_id"]
+
+        target = thread.call_args.kwargs["target"]
+        args = thread.call_args.kwargs["args"]
+        driver = Mock(current_url="https://workspace.example/quickrep", title="Quick Report", window_handles=[])
+        service = Mock(timeout=30)
+        service._create_browser.return_value = driver
+
+        with (
+            patch("services.bma_page_monitor.BMAService", return_value=service),
+            patch("services.bma_page_monitor.create_ronda_work_order", side_effect=RuntimeError("Firefox fechou")),
+            patch("services.bma_page_monitor.falhar_criacao_ronda"),
+        ):
+            target(*args)
+
+        state = monitor.get(monitor_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertNotIn("Firefox ficará aberto", state["message"])
+        driver.quit.assert_called_once_with()
+        self.assertIsNone(monitor._sessions[monitor_id]["driver"])
+        self.assertFalse(monitor._browser_lock.locked())
+
+    def test_preparation_collection_reads_and_persists_without_bma_write_actions(self):
+        monitor = BmaPageMonitor()
+        orders = [
+            {"siteid": "RES", "wonum": "RES6707859"},
+            {"siteid": "RES", "wonum": "RES6707860"},
+        ]
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_preparation_collection(orders)
+
+        monitor_id = result["monitor_id"]
+        target = thread.call_args.kwargs["target"]
+        args = thread.call_args.kwargs["args"]
+        driver = Mock()
+        service = Mock(timeout=30, login_timeout=600)
+        service._create_browser.return_value = driver
+        lines = [{"especialidade": "180", "quantidade": "1", "horas normais": "1:00"}]
+
+        with (
+            patch("services.bma_page_monitor.BMAService", return_value=service),
+            patch.object(monitor, "_wait_for_preparation_tracking") as wait_tracking,
+            patch.object(monitor, "pesquisar_ot") as search,
+            patch.object(monitor, "_ler_grade_aba", side_effect=[{"linhas": lines}, {"linhas": []}]),
+            patch("services.bma_page_monitor.salvar_mao_de_obra_preparacao", side_effect=[1, 0]) as save,
+            patch.object(monitor, "_save_current_order") as save_order,
+        ):
+            target(*args)
+
+        state = monitor.get(monitor_id)
+        self.assertEqual(target, monitor._run_preparation_collection)
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["completed_wonums"], ["RES6707859", "RES6707860"])
+        self.assertEqual((state["rows_found"], state["empty_count"], state["failed_count"]), (1, 1, 0))
+        wait_tracking.assert_called_once()
+        self.assertEqual(wait_tracking.call_args.args[:3], (monitor_id, driver, service))
+        service._create_browser.assert_called_once_with(page_load_strategy="eager", headless=False)
+        self.assertEqual([call.args[2] for call in search.call_args_list], ["RES6707859", "RES6707860"])
+        self.assertEqual(save.call_args_list[0].args, ("RES", "RES6707859", lines))
+        self.assertEqual(save.call_args_list[1].args, ("RES", "RES6707860", []))
+        save_order.assert_not_called()
+        driver.quit.assert_called_once_with()
+
+    def test_preparation_collection_accepts_multiple_orders_per_queue(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_preparation_collection([
+                {"siteid": "RES", "wonum": "RES6707859"},
+                {"siteid": "RES", "wonum": "RES6707860"},
+            ])
+        state = monitor.get(result["monitor_id"])
+        self.assertEqual(state["queue_total"], 2)
+        self.assertEqual(state["selected_wonums"], ["RES6707859", "RES6707860"])
+        self.assertEqual(thread.call_args.kwargs["target"], monitor._run_preparation_collection)
+
+    def test_preparation_collection_clicks_sso_login_and_waits_for_tracking(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_preparation_collection([{"siteid": "RES", "wonum": "RES6707859"}])
+
+        monitor_id = result["monitor_id"]
+        driver = Mock()
+        driver.current_url = "https://login-fed.michelin.com/auth"
+        driver.title = "Login corporativo"
+        service = Mock(wotrack_url=WOTRACK_URL)
+        login_button = Mock()
+        service._find_work_tracking_search.side_effect = [False, False, True]
+        service._advance_microsoft_email.return_value = False
+        service._find_login_button.return_value = login_button
+
+        with (
+            patch("services.bma_page_monitor.sleep"),
+        ):
+            ready = monitor._wait_for_preparation_tracking(monitor_id, driver, service, 0)
+
+        self.assertTrue(ready)
+        driver.get.assert_called_once_with(WOTRACK_URL)
+        login_button.click.assert_called_once_with()
+        service._find_work_tracking_search.assert_called_with(driver)
+        service._wait_for_work_tracking.assert_called_once_with(driver, unittest.mock.ANY)
+
+    def test_preparation_collection_advances_email_on_microsoft_login(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread") as thread:
+            result = monitor.start_preparation_collection([{"siteid": "RES", "wonum": "RES6707859"}])
+
+        monitor_id = result["monitor_id"]
+        driver = Mock()
+        driver.current_url = "https://login.microsoftonline.com/tenant/oauth2/authorize"
+        driver.title = "Entrar em sua conta"
+        service = Mock(wotrack_url=WOTRACK_URL)
+        service._find_work_tracking_search.side_effect = [False, False, True]
+        service._advance_microsoft_email.return_value = True
+
+        with patch("services.bma_page_monitor.sleep"):
+            ready = monitor._wait_for_preparation_tracking(monitor_id, driver, service, 0)
+
+        self.assertTrue(ready)
+        service._advance_microsoft_email.assert_called_once_with(driver)
+        service._find_login_button.assert_not_called()
+        service._wait_for_work_tracking.assert_called_once_with(driver, unittest.mock.ANY)
+
     def test_open_order_opens_result_without_processing_or_saving(self):
         monitor = BmaPageMonitor()
         with patch("services.bma_page_monitor.Thread"):
@@ -108,7 +533,26 @@ class BmaPageMonitorTests(unittest.TestCase):
         self.assertEqual(monitor.get(monitor_id)["opened_wonum"], "RES6707859")
         driver.quit.assert_called_once_with()
 
-    def test_browser_cache_cleanup_removes_history_cookies_and_site_storage(self):
+    def test_open_order_waits_for_bma_login_monitor(self):
+        monitor = BmaPageMonitor()
+        with patch("services.bma_page_monitor.Thread"):
+            monitor_id = monitor.start_open_order("RES6707859")["monitor_id"]
+
+        driver = Mock()
+        driver.current_url = "https://login.microsoftonline.com/tenant/oauth2/authorize"
+        driver.title = "Entrar em sua conta"
+        service = Mock(timeout=30, login_timeout=600)
+        service._create_browser.return_value = driver
+        service._wait_for_work_tracking.return_value = None
+
+        with patch("services.bma_page_monitor.BMAService", return_value=service):
+            monitor._run_open_order_only(monitor_id, "RES6707859")
+
+        service._wait_for_work_tracking.assert_called_once_with(driver, unittest.mock.ANY)
+        self.assertEqual(monitor.get(monitor_id)["status"], "completed")
+        driver.quit.assert_not_called()
+
+    def test_browser_cache_cleanup_preserves_authentication_and_removes_history(self):
         with tempfile.TemporaryDirectory() as local_app_data:
             profile = Path(local_app_data) / "BMA_Automacao" / "FirefoxProfile"
             for directory in ("cache2", "startupCache", "thumbnails", "storage", "sessionstore-backups"):
@@ -124,12 +568,16 @@ class BmaPageMonitorTests(unittest.TestCase):
             with patch.dict(os.environ, {"LOCALAPPDATA": local_app_data}):
                 BMAService().clear_browser_cache_and_history()
 
-            for directory in ("cache2", "startupCache", "thumbnails", "storage", "sessionstore-backups"):
+            for directory in ("cache2", "startupCache", "thumbnails", "sessionstore-backups"):
                 self.assertFalse((profile / directory).exists())
+            self.assertTrue((profile / "storage").exists())
             self.assertFalse((profile / "places.sqlite").exists())
-            self.assertFalse((profile / "cookies.sqlite").exists())
-            self.assertFalse((profile / "cookies.sqlite-shm").exists())
-            self.assertFalse((profile / "cookies.sqlite-wal").exists())
+            self.assertTrue((profile / "cookies.sqlite").exists())
+            self.assertTrue((profile / "cookies.sqlite-shm").exists())
+            self.assertTrue((profile / "cookies.sqlite-wal").exists())
+            self.assertTrue((profile / "storage.sqlite").exists())
+            self.assertTrue((profile / "webappsstore.sqlite").exists())
+            self.assertFalse((profile / "formhistory.sqlite").exists())
             self.assertFalse((profile / "sessionstore.jsonlz4").exists())
 
     def test_monitor_can_start_and_stop_without_exposing_field_values(self):

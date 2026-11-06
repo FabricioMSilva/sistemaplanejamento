@@ -42,7 +42,7 @@ export default function UploadPanel({ file, loading, onSelect, onProcess }: Uplo
           type="button"
           onClick={onProcess}
           disabled={!file || loading}
-          className="rounded-lg bg-accent-500 px-4 py-2.5 text-sm font-semibold text-navy-950 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-lg bg-accent-500 px-4 py-2.5 text-sm font-semibold text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           {loading ? "Processando..." : "Processar Arquivo"}
         </button>

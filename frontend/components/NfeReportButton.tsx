@@ -3,7 +3,7 @@ import { FileSpreadsheet, Loader2 } from "lucide-react";
 import { obterSincronizacao, sincronizarOrdensTrabalho } from "@/services/api";
 import { exportNfeReport } from "@/services/pcm";
 
-export default function NfeReportButton() {
+export default function NfeReportButton({ compact = false }: { compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -45,8 +45,8 @@ export default function NfeReportButton() {
     }
   }
 
-  return <div className="max-w-xl">
-    <button type="button" disabled={busy} onClick={() => void generate()} className="pcm-primary-button"
+  return <div className={compact ? "w-full" : "max-w-xl"}>
+    <button type="button" disabled={busy} onClick={() => void generate()} className={compact ? "pcm-small-button w-full justify-start" : "pcm-primary-button"}
       title="Atualiza as OTs abertas do setor RES-TC-NF no BMA e baixa o modelo Report, sem filtro de data ou tipo">
       {busy ? <Loader2 size={16} className="animate-spin" /> : <FileSpreadsheet size={16} />}
       {busy ? "Atualizando BMA · Excel NFE..." : "Atualizar BMA e gerar Excel NFE"}

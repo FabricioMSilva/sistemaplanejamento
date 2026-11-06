@@ -37,8 +37,15 @@ carteira-*.xlsx
 # Node
 frontend/node_modules/
 frontend/.next/
+frontend/.next-dev/
+frontend/.next-desktop/
+.next/
 frontend/out/
 *.tsbuildinfo
+
+# Windows distribution artifacts and downloaded build tools
+build/
+dist/
 
 # OS / IDE
 .DS_Store

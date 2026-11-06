@@ -12,7 +12,20 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
 from services.BMAService import BMAService, BMAServiceError
-from services.bma_planning_reader import PlanningReadMixin
+from services.bma_planning_reader import COLUNAS_PREPARACAO, PlanningReadMixin
+from models.database import (
+    falhar_criacao_ronda, iniciar_criacao_ronda, listar_funcionarios_ronda,
+    listar_itens_ronda_para_criacao, listar_itens_ronda_sharepoint, listar_mao_de_obra, registrar_historico_ot,
+    marcar_ot_ronda_salva, registrar_numero_ot_ronda, registrar_ot_ronda_criada,
+    salvar_funcionarios_ronda, salvar_itens_ronda_sharepoint,
+    salvar_mao_de_obra_preparacao,
+)
+from services.nf_workforce import abrir_sharepoint_autenticado, coletar_ots_ronda
+from services.ronda_sharepoint_report import (
+    atualizar_excel_ots_ronda, baixar_excel_ots_ronda, enviar_excel_ots_ronda,
+)
+from services.ronda_quick_report import create_ronda_work_order
+from services.ronda_work_orders import prepare_ronda_orders
 
 WOTRACK_URL = (
     "https://workspace.manage.rbmanca4.rosa-maximo-prod.aws.michelin.com/"
@@ -99,8 +112,8 @@ class BmaPageMonitor(PlanningReadMixin):
                     "stage": "starting",
                     "selected_wonums": selected,
                     "queue_total": len(selected),
-                    "current_order_index": 0,
-                    "current_wonum": None,
+                    "current_order_index": 1,
+                    "current_wonum": selected[0],
                     "completed_wonums": [],
                     "failed_wonum": None,
                     "opened_wonum": None,
@@ -122,6 +135,531 @@ class BmaPageMonitor(PlanningReadMixin):
 
     def start_open_order(self, wonum: str):
         return self._start_read_only(wonum, "open_order")
+
+    def start_preparation_collection(self, orders: list[dict]):
+        if not isinstance(orders, list) or not orders:
+            raise BMAServiceError("Selecione ao menos uma OT para coletar a Preparação.")
+        if len(orders) > 1000:
+            raise BMAServiceError("Selecione no máximo 1000 OTs por coleta.")
+        selected = []
+        normalized_orders = []
+        for order in orders:
+            if not isinstance(order, dict):
+                raise BMAServiceError("Lista de OTs inválida para coleta.")
+            siteid = str(order.get("siteid", "")).strip().upper()
+            wonum = str(order.get("wonum", "")).strip().upper()
+            if (
+                not siteid or not all(character.isalnum() or character == "-" for character in siteid)
+                or not wonum or not all(character.isalnum() or character == "-" for character in wonum)
+            ):
+                raise BMAServiceError("Site ou número de OT inválido para coleta.")
+            selected.append(wonum)
+            normalized_orders.append({"siteid": siteid, "wonum": wonum})
+        if len(set(selected)) != len(selected):
+            raise BMAServiceError("A lista de coleta contém OTs duplicadas.")
+
+        drivers_to_close = []
+        with self._lock:
+            for session in self._sessions.values():
+                if session["state"]["status"] in {"starting", "monitoring", "stopping"}:
+                    session["stop"].set()
+                    if session.get("driver"):
+                        drivers_to_close.append(session["driver"])
+                    session["state"].update(
+                        status="stopping",
+                        message="Substituindo a sessão BMA pela coleta de Preparação.",
+                    )
+            monitor_id = uuid4().hex
+            self._sessions[monitor_id] = {
+                "state": {
+                    "monitor_id": monitor_id,
+                    "mode": "preparation_collection",
+                    "inspection_only": True,
+                    "status": "starting",
+                    "stage": "starting",
+                    "progress": 0,
+                    "message": "Abrindo o BMA para coletar as OTs pendentes.",
+                    "selected_wonums": selected,
+                    "queue_total": len(selected),
+                    "current_order_index": 0,
+                    "current_wonum": None,
+                    "completed_wonums": [],
+                    "failed_wonums": [],
+                    "collected_count": 0,
+                    "rows_found": 0,
+                    "empty_count": 0,
+                    "failed_count": 0,
+                    "elapsed_seconds": 0,
+                },
+                "stop": Event(),
+                "driver": None,
+                "orders": normalized_orders,
+            }
+        for driver in drivers_to_close:
+            Thread(target=self._close_browser, args=(driver,), daemon=True).start()
+        Thread(target=self._run_preparation_collection, args=(monitor_id, normalized_orders), daemon=True).start()
+        return {"monitor_id": monitor_id}
+
+    def start_ronda_sharepoint(self):
+        if self._browser_lock.locked():
+            raise BMAServiceError("Outra operação está usando o Firefox. Aguarde antes de consultar as OTs de Ronda.")
+        monitor_id = uuid4().hex
+        with self._lock:
+            self._sessions[monitor_id] = {
+                "state": {
+                    "monitor_id": monitor_id,
+                    "mode": "ronda_sharepoint",
+                    "inspection_only": True,
+                    "status": "starting",
+                    "stage": "starting",
+                    "progress": 0,
+                    "message": "Abrindo a lista AbrirOTRonda no SharePoint.",
+                    "fields": [],
+                    "queue_total": 0,
+                    "ronda_items": [],
+                    "ronda_items_bloqueados": [],
+                    "ronda_counts": {},
+                },
+                "stop": Event(),
+                "driver": None,
+            }
+        Thread(target=self._run_ronda_sharepoint, args=(monitor_id,), daemon=True).start()
+        return {"monitor_id": monitor_id}
+
+    def start_ronda_excel_export(self):
+        if self._browser_lock.locked():
+            raise BMAServiceError("Outra operação está usando o Firefox. Aguarde antes de atualizar o Excel de Ronda.")
+        monitor_id = uuid4().hex
+        with self._lock:
+            self._sessions[monitor_id] = {
+                "state": {
+                    "monitor_id": monitor_id, "mode": "ronda_excel_export", "inspection_only": False,
+                    "status": "starting", "stage": "starting", "progress": 0,
+                    "message": "Preparando o Excel de OTs de Ronda.", "fields": [], "queue_total": 0,
+                },
+                "stop": Event(), "driver": None,
+            }
+        Thread(target=self._run_ronda_excel_export, args=(monitor_id,), daemon=True).start()
+        return {"monitor_id": monitor_id}
+
+    def start_ronda_creation(self, *, retry_failed: bool = True, limit: int | None = None):
+        if self._browser_lock.locked():
+            raise BMAServiceError("Outra operação está usando o Firefox. Aguarde antes de criar OTs.")
+        if limit not in (None, 1):
+            raise BMAServiceError("A quantidade deve ser 1 OT ou o lote completo.")
+        items = listar_itens_ronda_para_criacao(incluir_falhas=retry_failed)
+        try:
+            prepared = prepare_ronda_orders(items)
+        except ValueError as exc:
+            raise BMAServiceError(str(exc)) from exc
+        all_orders = prepared["orders"]
+        orders = all_orders[:1] if limit == 1 else all_orders
+        remaining_count = len(all_orders) - len(orders)
+        sharepoint_ids = list(dict.fromkeys(
+            int(item_id) for order in orders for item_id in order["sharepoint_ids"]
+        ))
+        if not orders:
+            raise BMAServiceError("Não há grupos completos de rondas prontos para criar. Verifique as execuções aguardando no calendário.")
+        iniciar_criacao_ronda(sharepoint_ids)
+        monitor_id = uuid4().hex
+        resume_event = Event()
+        resume_event.set()
+        with self._lock:
+            self._sessions[monitor_id] = {
+                "state": {
+                    "monitor_id": monitor_id, "mode": "ronda_creation", "inspection_only": False,
+                    "status": "starting", "stage": "starting", "progress": 0,
+                    "message": "Preparando OTs e abrindo o BMA.", "fields": [],
+                    "queue_total": len(orders), "current_order_index": 0,
+                    "current_wonum": None, "ronda_ots_criadas": [],
+                    "ronda_ots_salvas": [], "ronda_remaining": remaining_count,
+                    "failed_wonums": [], "ronda_waiting": prepared["waiting"], "events": [],
+                },
+                "stop": Event(), "pause": Event(), "resume": resume_event, "driver": None,
+            }
+        Thread(
+            target=self._run_ronda_creation,
+            args=(monitor_id, orders, sharepoint_ids, prepared["waiting"], remaining_count),
+            daemon=True,
+        ).start()
+        return {"monitor_id": monitor_id}
+
+    def pause_ronda_creation(self, monitor_id: str):
+        with self._lock:
+            session = self._sessions.get(monitor_id)
+            if not session or session["state"].get("mode") != "ronda_creation":
+                raise BMAServiceError("O lote de OTs não está mais ativo neste monitor.")
+            if session["state"].get("status") not in {"starting", "monitoring", "pausing", "paused"}:
+                raise BMAServiceError("O lote já foi encerrado e precisa ser retomado como uma nova execução.")
+            session["pause"].set()
+            session["resume"].clear()
+            if session["state"].get("status") != "paused":
+                session["state"].update(
+                    status="pausing", stage="pausing",
+                    message="Pausa solicitada; será aplicada após a OT atual.",
+                )
+            return deepcopy(session["state"])
+
+    def resume_ronda_creation(self, monitor_id: str):
+        with self._lock:
+            session = self._sessions.get(monitor_id)
+            if not session or session["state"].get("mode") != "ronda_creation":
+                raise BMAServiceError("O lote não está mais ativo neste monitor.")
+            if session["state"].get("status") not in {"pausing", "paused"}:
+                raise BMAServiceError("O lote não está pausado.")
+            session["pause"].clear()
+            session["resume"].set()
+            session["state"].update(
+                status="monitoring", stage="resuming", message="Retomando o lote após a pausa.",
+            )
+            return deepcopy(session["state"])
+
+    def _run_ronda_creation(self, monitor_id, orders, all_sharepoint_ids, waiting, remaining_count=0):
+        driver = None
+        keep_browser_open = False
+        created = []
+        saved = []
+        checkpoints = {}
+        started_at = monotonic()
+        self._browser_lock.acquire()
+        try:
+            service = BMAService()
+            self._update(
+                monitor_id, status="monitoring", stage="authenticating", progress=3,
+                message="Abrindo o Firefox, autenticando no BMA e entrando no Quick Report.",
+            )
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            self._registrar_driver(monitor_id, driver)
+            driver.set_page_load_timeout(service.timeout)
+            driver.set_script_timeout(service.timeout)
+            service._wait_for_quick_report(
+                driver,
+                lambda stage, message, *_args: self._update(
+                    monitor_id, stage=stage, progress=8, message=message,
+                    page_url=driver.current_url, page_title=driver.title,
+                ),
+            )
+
+            for index, order in enumerate(orders, start=1):
+                while True:
+                    with self._lock:
+                        session = self._sessions.get(monitor_id)
+                        if not session or session["stop"].is_set():
+                            raise BMAServiceError("Criação das OTs interrompida pelo usuário.")
+                        pause_requested = session["pause"].is_set()
+                        resume = session["resume"]
+                    if not pause_requested:
+                        break
+                    self._update(
+                        monitor_id, status="paused", stage="paused",
+                        message=f"Lote pausado após a OT anterior. Próxima OT: {index} de {len(orders)}.",
+                    )
+                    resume.wait(0.5)
+                with self._lock:
+                    session = self._sessions.get(monitor_id)
+                    if not session or session["stop"].is_set():
+                        raise BMAServiceError("Criação das OTs interrompida pelo usuário.")
+                self._update(
+                    monitor_id, stage="opening_order", current_order_index=index,
+                    progress=10 + int((index - 1) / len(orders) * 85),
+                    current_sharepoint_ids=order["sharepoint_ids"],
+                    message=(f"OT {index} de {len(orders)} · SharePoint {', '.join(map(str, order['sharepoint_ids']))}: "
+                             "abrindo formulário no Quick Report."),
+                )
+                progress_step = 0
+
+                def report_progress(message):
+                    nonlocal progress_step
+                    progress_step += 1
+                    within_order = min(0.95, progress_step * 0.045)
+                    progress = 10 + int(((index - 1) + within_order) / len(orders) * 85)
+                    current_number = checkpoints.get(index, {}).get("numero_ot")
+                    self._update(
+                        monitor_id, stage="filling_order", current_order_index=index,
+                        current_sharepoint_ids=order["sharepoint_ids"], current_wonum=current_number,
+                        progress=progress,
+                        message=(f"OT {index} de {len(orders)} · SharePoint {', '.join(map(str, order['sharepoint_ids']))}"
+                                 f"{f' · RES {current_number}' if current_number else ''}: {message}"),
+                    )
+
+                def record_number(value):
+                    registrar_numero_ot_ronda(order["sharepoint_ids"], value)
+                    checkpoints[index] = {"numero_ot": value, "sharepoint_ids": order["sharepoint_ids"],
+                                          "ronda": order["ronda"], "status": "numero_gerado"}
+                    self._update(monitor_id, stage="filling_order", ronda_ots_salvas=checkpoints.copy(),
+                                 current_wonum=value,
+                                 message=f"OT {index} de {len(orders)} · RES {value} gerado; preenchendo os dados.")
+
+                def record_saved(value):
+                    marcar_ot_ronda_salva(order["sharepoint_ids"], value)
+                    checkpoints[index]["status"] = "salva"
+                    saved.append(checkpoints[index].copy())
+                    self._update(monitor_id, ronda_ots_salvas=saved.copy(),
+                                 message=f"OT {value} salva no BMA e registrada no SQL.")
+
+                def record_completed(value):
+                    registrar_ot_ronda_criada(order["sharepoint_ids"], value)
+                    checkpoints[index]["status"] = "criada"
+                    created.append(checkpoints[index].copy())
+
+                number = create_ronda_work_order(
+                    driver,
+                    order,
+                    on_number=record_number,
+                    on_saved=record_saved,
+                    on_completed=record_completed,
+                    on_progress=report_progress,
+                )
+                registrar_historico_ot(
+                    "criacao_solicitada", "criada", "Criar OTs de Ronda",
+                    wonum=number, siteid="RES",
+                    detalhes={"ronda": order["ronda"], "sharepoint_ids": order["sharepoint_ids"]},
+                )
+                self._update(
+                    monitor_id, stage="creating", progress=10 + int(index / len(orders) * 85),
+                    ronda_ots_criadas=created.copy(), ronda_ots_salvas=saved.copy(),
+                    message=f"OT {number} criada e concluída em COMP ({index}/{len(orders)}).",
+                )
+
+            self._update(
+                monitor_id, status="completed", stage="completed", progress=100,
+                elapsed_seconds=round(monotonic() - started_at),
+                ronda_ots_criadas=created, ronda_ots_salvas=saved,
+                ronda_remaining=remaining_count,
+                message=(f"Lote concluído: {len(created)} OT(s) criada(s) e concluída(s) no BMA. "
+                         f"{remaining_count} OT(s) permanecem na fila; {len(waiting)} grupo(s) aguardam execuções suficientes. "
+                         "Lista SharePoint não alterada."),
+            )
+            self._close_browser(driver)
+            driver = None
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            try:
+                keep_browser_open = bool(driver and driver.window_handles)
+            except WebDriverException:
+                keep_browser_open = False
+            already_created = {
+                int(item_id)
+                for result in checkpoints.values() if result["status"] == "criada"
+                for item_id in result["sharepoint_ids"]
+            }
+            remaining_ids = [item_id for item_id in all_sharepoint_ids if item_id not in already_created]
+            falhar_criacao_ronda(remaining_ids, message)
+            self._update(
+                monitor_id, status="failed", stage="failed",
+                elapsed_seconds=round(monotonic() - started_at),
+                ronda_ots_criadas=created, ronda_ots_salvas=saved,
+                failed_wonums=remaining_ids,
+                message=f"Lote interrompido: {message}. {len(saved)} OT(s) salvas com número no SQL; "
+                    f"{len(created)} concluída(s) em COMP. "
+                    f"{'O Firefox ficará aberto para conferência.' if keep_browser_open else ''}",
+            )
+        finally:
+            if not keep_browser_open:
+                if driver:
+                    self._close_browser(driver)
+                with self._lock:
+                    session = self._sessions.get(monitor_id)
+                    if session:
+                        session["driver"] = None
+                self._browser_lock.release()
+
+    def start_bma_entry(self):
+        if self._browser_lock.locked():
+            raise BMAServiceError("Outra operação está usando o Firefox. Aguarde antes de entrar no BMA.")
+        monitor_id = uuid4().hex
+        with self._lock:
+            self._sessions[monitor_id] = {
+                "state": {
+                    "monitor_id": monitor_id, "mode": "bma_entry", "inspection_only": True,
+                    "status": "starting", "stage": "starting", "progress": 0,
+                    "message": "Abrindo o Quick Report no BMA.", "fields": [],
+                },
+                "stop": Event(), "driver": None,
+            }
+        Thread(target=self._run_bma_entry, args=(monitor_id,), daemon=True).start()
+        return {"monitor_id": monitor_id}
+
+    def _run_bma_entry(self, monitor_id: str):
+        driver = None
+        started_at = monotonic()
+        keep_browser_open = False
+        self._browser_lock.acquire()
+        try:
+            service = BMAService()
+            self._update(
+                monitor_id, status="monitoring", stage="authenticating", progress=5,
+                message="Abrindo o Firefox e verificando a sessão do BMA.",
+            )
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            self._registrar_driver(monitor_id, driver)
+            driver.set_page_load_timeout(service.timeout)
+            driver.set_script_timeout(service.timeout)
+
+            def progress(stage, message, *_args):
+                self._update(
+                    monitor_id, status="monitoring", stage=stage,
+                    progress=50 if stage == "autenticacao" else 90,
+                    message=message, page_url=driver.current_url, page_title=driver.title,
+                    elapsed_seconds=round(monotonic() - started_at),
+                )
+
+            service._wait_for_quick_report(driver, progress)
+            self._update(
+                monitor_id, status="completed", stage="quick_report_ready", progress=100,
+                message="Sessão BMA ativa. O Quick Report está aberto; nenhuma OT foi criada.",
+                page_url=driver.current_url, page_title=driver.title,
+                elapsed_seconds=round(monotonic() - started_at),
+            )
+            keep_browser_open = True
+        except Exception as exc:
+            self._update(
+                monitor_id, status="failed", stage="failed",
+                elapsed_seconds=round(monotonic() - started_at),
+                message=f"Não foi possível entrar no BMA: {str(exc).strip() or type(exc).__name__}",
+            )
+        finally:
+            if driver and not keep_browser_open:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+            if not keep_browser_open:
+                with self._lock:
+                    session = self._sessions.get(monitor_id)
+                    if session:
+                        session["driver"] = None
+                self._browser_lock.release()
+
+    def _run_ronda_sharepoint(self, monitor_id: str):
+        driver = None
+        started_at = monotonic()
+        self._browser_lock.acquire()
+        try:
+            service = BMAService()
+            self._update(monitor_id, status="monitoring", stage="authenticating", progress=5,
+                         message="Abrindo o Firefox para autenticar no SharePoint.")
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            self._registrar_driver(monitor_id, driver)
+            driver.set_page_load_timeout(service.timeout)
+            driver.set_script_timeout(service.timeout)
+            workers = listar_mao_de_obra(None, filtrar_nf=False)["profissionais"]
+
+            def progress(stage, message, _page, count):
+                progress_by_stage = {
+                    "navegando": 15, "lendo_colunas": 40, "lendo_itens": 65,
+                    "concluido": 90,
+                }
+                self._update(
+                    monitor_id, stage=stage, progress=progress_by_stage.get(stage, 50),
+                    queue_total=count or 0, message=message,
+                )
+
+            result = coletar_ots_ronda(driver, service.login_timeout, workers, progress)
+            items = result["pendentes"]
+            blocked_items = result.get("bloqueadas", [])
+            employees = result["funcionarios"]
+            saved_items = salvar_itens_ronda_sharepoint(result.get("itens", [*items, *blocked_items]))
+            saved_employees = salvar_funcionarios_ronda(employees)
+            stored_employees = listar_funcionarios_ronda()
+            counts = {}
+            for item in [*items, *blocked_items]:
+                counts[item["ronda"]] = counts.get(item["ronda"], 0) + 1
+            self._update(
+                monitor_id, status="completed", stage="completed", progress=100,
+                elapsed_seconds=round(monotonic() - started_at), queue_total=len(items) + len(blocked_items),
+                collected_count=len(items) + len(blocked_items), ronda_items=items,
+                ronda_items_bloqueados=blocked_items, ronda_counts=counts,
+                ronda_funcionarios=stored_employees, ronda_funcionarios_novos=saved_employees,
+                ronda_itens_salvos=saved_items,
+                message=(f"Consulta concluída: {len(items)} OT(s) apta(s), {len(blocked_items)} bloqueada(s) por matrícula, "
+                         f"{saved_items} registro(s) salvo(s) no SQL, {len(employees)} funcionário(s) com matrícula "
+                         f"e {saved_employees} atualizado(s). "
+                         "Nenhuma OT foi criada."),
+            )
+        except Exception as exc:
+            log.exception("[%s] consulta da lista AbrirOTRonda falhou", monitor_id)
+            self._update(
+                monitor_id, status="failed", stage="failed", elapsed_seconds=round(monotonic() - started_at),
+                message=f"Falha ao consultar AbrirOTRonda: {str(exc).strip() or type(exc).__name__}",
+            )
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = None
+            self._browser_lock.release()
+
+    def _run_ronda_excel_export(self, monitor_id: str):
+        driver = None
+        started_at = monotonic()
+        self._browser_lock.acquire()
+        try:
+            items = listar_itens_ronda_sharepoint()
+            service = BMAService()
+            self._update(
+                monitor_id, status="monitoring", stage="authenticating", progress=5,
+                message="Abrindo o Firefox para autenticar e atualizar o Excel no SharePoint.",
+            )
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            self._registrar_driver(monitor_id, driver)
+            driver.set_page_load_timeout(service.timeout)
+            driver.set_script_timeout(service.timeout)
+
+            def progress(stage, message, *_args):
+                self._update(
+                    monitor_id, stage=stage, progress=20 if stage == "navegando" else 45,
+                    message=message,
+                )
+
+            abrir_sharepoint_autenticado(driver, service.login_timeout, progress)
+            self._update(
+                monitor_id, stage="reading_existing", progress=60,
+                message="Lendo a tabela dadosOT existente para comparar os registros.",
+            )
+            existing_content = baixar_excel_ots_ronda(driver)
+            content, added_count, created_file = atualizar_excel_ots_ronda(existing_content, items)
+            if not added_count and not created_file:
+                self._update(
+                    monitor_id, status="completed", stage="completed", progress=100,
+                    elapsed_seconds=round(monotonic() - started_at), queue_total=len(items),
+                    message="Tabela dadosOT já está atualizada; nenhuma linha foi alterada ou removida.",
+                )
+                return
+            self._update(
+                monitor_id, stage="uploading", progress=80, queue_total=added_count,
+                message=(f"{('Criando' if created_file else f'Anexando {added_count} linha(s) à')} "
+                         "tabela dadosOT sem substituir as linhas existentes."),
+            )
+            file_path = enviar_excel_ots_ronda(driver, content)
+            self._update(
+                monitor_id, status="completed", stage="completed", progress=100,
+                elapsed_seconds=round(monotonic() - started_at), queue_total=added_count,
+                message=(f"Arquivo {('criado' if created_file else 'atualizado')} com "
+                         f"{added_count} linha(s) nova(s) na tabela dadosOT: {file_path}. Dados existentes preservados."),
+            )
+        except Exception as exc:
+            self._update(
+                monitor_id, status="failed", stage="failed", progress=100,
+                elapsed_seconds=round(monotonic() - started_at),
+                message=f"Falha ao atualizar OTS de Rondas.xlsx: {str(exc).strip() or type(exc).__name__}",
+            )
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = None
+            self._browser_lock.release()
 
     def _start_read_only(self, wonum: str, mode: str):
         wonum = str(wonum or "").strip().upper()
@@ -183,21 +721,64 @@ class BmaPageMonitor(PlanningReadMixin):
             session = self._sessions.get(monitor_id)
             return deepcopy(session["state"]) if session else None
 
+    def latest(self, mode: str):
+        with self._lock:
+            matches = [session["state"] for session in self._sessions.values()
+                       if session["state"].get("mode") == mode]
+            return deepcopy(matches[-1]) if matches else None
+
     def stop(self, monitor_id: str):
+        completed_bma_driver = None
         with self._lock:
             session = self._sessions.get(monitor_id)
             if not session:
                 return None
             session["stop"].set()
-            session["state"]["status"] = "stopping"
-            session["state"]["message"] = "Encerrando o monitor e a sessão Firefox."
-            return deepcopy(session["state"])
+            if session.get("resume"):
+                session["resume"].set()
+            mode = session["state"].get("mode")
+            is_held_bma_session = (
+                mode == "bma_entry" and session["state"]["status"] == "completed"
+            ) or (
+                mode == "ronda_creation" and session["state"]["status"] == "failed"
+                and session.get("driver") is not None
+            )
+            if is_held_bma_session:
+                completed_bma_driver = session.get("driver")
+                session["driver"] = None
+                session["state"].update(
+                    status="stopped", stage="stopped", message="Sessão Firefox do BMA encerrada.",
+                )
+            else:
+                session["state"]["status"] = "stopping"
+                session["state"]["message"] = "Encerrando o monitor e a sessão Firefox."
+            state = deepcopy(session["state"])
+        if completed_bma_driver:
+            self._close_browser(completed_bma_driver)
+            self._browser_lock.release()
+        return state
 
     def _update(self, monitor_id: str, **values):
         with self._lock:
             session = self._sessions.get(monitor_id)
             if session:
-                session["state"].update(values)
+                state = session["state"]
+                message = values.get("message")
+                if message and message != state.get("message"):
+                    events = state.setdefault("events", [])
+                    events.append({
+                        "stage": values.get("stage", state.get("stage", "")),
+                        "message": message,
+                        "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    })
+                    del events[:-8]
+                state.update(values)
+
+    def _registrar_driver(self, monitor_id: str, driver) -> None:
+        with self._lock:
+            session = self._sessions.get(monitor_id)
+            if session:
+                session["driver"] = driver
 
     @staticmethod
     def _visible_fields(driver, *, frame_path="principal", depth=0):
@@ -459,7 +1040,7 @@ class BmaPageMonitor(PlanningReadMixin):
               }) || null;
         """, label)
 
-    # Mensagens do Maximo respondidas com OK; as demais são fechadas e interrompem a OT.
+    # Mensagens do Maximo respondidas automaticamente; as demais interrompem a OT.
     ACCEPTED_MAXIMO_MESSAGES = {
         "BMXAA0159W",  # datas programadas posteriores à restrição de término: aplica a data do planejador
     }
@@ -477,20 +1058,28 @@ class BmaPageMonitor(PlanningReadMixin):
               if (!code) continue;
               const buttons = Array.from(box.querySelectorAll('button,[role=button]')).filter(visible);
               const find = (name) => buttons.find((b) => norm(b.innerText).toLowerCase() === name) || null;
-              return { code: code[0], text: text.slice(0, 400), ok: find('ok'), close: find('fechar') || find('close') };
+                            return { code: code[0], text: text.slice(0, 400), ok: find('ok'),
+                                yes: find('sim') || find('yes'), close: find('fechar') || find('close') };
             }
             return null;
         """)
         if not isinstance(message, dict):
             return False
-        accepted = message["code"] in BmaPageMonitor.ACCEPTED_MAXIMO_MESSAGES and message.get("ok")
-        button = message.get("ok") if accepted else message.get("close") or message.get("ok")
+        save_confirmation = (
+            message["code"] == "BMXAA2300I"
+            and "deseja salvar as mudanças antes de continuar" in message["text"].casefold()
+            and message.get("yes")
+        )
+        accepted = (message["code"] in BmaPageMonitor.ACCEPTED_MAXIMO_MESSAGES and message.get("ok")) or save_confirmation
+        button = message.get("yes") if save_confirmation else (
+            message.get("ok") if accepted else message.get("close") or message.get("ok")
+        )
         if button:
             button.click()
         if not accepted:
             raise BMAServiceError(f"Mensagem do BMA: {message['text']}")
         handled = getattr(driver, "_bma_messages", [])
-        handled.append(f"{message['code']} respondida com OK")
+        handled.append(f"{message['code']} respondida com {'Sim' if save_confirmation else 'OK'}")
         driver._bma_messages = handled
         return True
 
@@ -524,6 +1113,9 @@ class BmaPageMonitor(PlanningReadMixin):
         for attempt in range(5):
             BmaPageMonitor._wait_maximo_idle(driver)
             try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", element,
+                )
                 element.click()
                 return
             except ElementClickInterceptedException:
@@ -543,8 +1135,23 @@ class BmaPageMonitor(PlanningReadMixin):
         raise BMAServiceError(f"A aba {label} do Maximo não foi encontrada.")
 
     @staticmethod
-    def _replace_input(element, value, *, select_suggestion=False):
-        BmaPageMonitor._click_when_idle(element.parent, element)
+    def _replace_input(
+        element, value, *, select_suggestion=False, focus_on_table_filter_interception=False,
+    ):
+        driver = element.parent
+        try:
+            BmaPageMonitor._click_when_idle(driver, element)
+        except ElementClickInterceptedException as exc:
+            if not focus_on_table_filter_interception or "tablefilterfield" not in str(exc):
+                raise
+        if focus_on_table_filter_interception:
+            focused = driver.execute_script("""
+                arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});
+                arguments[0].focus();
+                return document.activeElement === arguments[0];
+            """, element)
+            if not focused:
+                raise BMAServiceError("Não foi possível focar o campo de atribuição no BMA.")
         element.send_keys(Keys.CONTROL, "a")
         element.send_keys(value)
         if select_suggestion:
@@ -743,7 +1350,7 @@ class BmaPageMonitor(PlanningReadMixin):
                 raise BMAServiceError(f"Campos de atribuição incompletos na OT {order['wonum']}.")
             laborcode = assignment["laborcode"].strip().upper()
             assignment_start = datetime.combine(date.fromisoformat(assignment["dia"]), datetime.min.time()).replace(minute=1)
-            self._replace_input(labor, laborcode, select_suggestion=True)
+            self._replace_input(labor, laborcode)
             self._replace_input(planned_day, assignment_start.strftime("%d/%m/%Y %H:%M"))
             self._replace_input(hours, self._format_maximo_hours(assignment["horas"]))
 
@@ -847,6 +1454,10 @@ class BmaPageMonitor(PlanningReadMixin):
             self._fill_assignments(monitor_id, driver, order)
             self._update(monitor_id, stage="verifying", message=f"OT {wonum}: conferindo PREPARED, datas e matrículas.")
             self._verify_saved_order(monitor_id, driver, order)
+            registrar_historico_ot(
+                "alterada", "PREPARED", "Monitor de OT", siteid=order["siteid"], wonum=wonum,
+                detalhes={"resumo": "Datas planejadas e atribuições gravadas e conferidas.", "ordem": order},
+            )
             completed.append(wonum)
             self._update(
                 monitor_id, completed_wonums=completed.copy(),
@@ -890,6 +1501,7 @@ class BmaPageMonitor(PlanningReadMixin):
             opened_wonum = None
             queue_completed = False
             login_clicked = False
+            email_submitted = False
             filter_error = None
             while True:
                 with self._lock:
@@ -907,21 +1519,31 @@ class BmaPageMonitor(PlanningReadMixin):
                     fields = []
                 page_url = driver.current_url
                 page_title = driver.title
-                if "auth.rbmanca4" in page_url or "login-fed.michelin.com" in page_url:
+                if any(host in page_url for host in (
+                    "auth.rbmanca4", "login-fed.michelin.com", "login.microsoftonline.com",
+                )):
                     tracking_ready = False
                     tracking_wait_started_at = None
                     if not login_clicked:
-                        try:
-                            login_button = self._find_login_button(driver)
-                        except WebDriverException:
-                            login_button = None
-                        if login_button:
-                            self._update(monitor_id, stage="authenticating", message="Acionando o login do BMA.")
-                            login_button.click()
+                        if service._advance_microsoft_email(driver):
                             login_clicked = True
+                            email_submitted = True
+                        else:
+                            try:
+                                login_button = self._find_login_button(driver)
+                            except WebDriverException:
+                                login_button = None
+                            if login_button:
+                                self._update(monitor_id, stage="authenticating", message="Acionando o login do BMA.")
+                                login_button.click()
+                                login_clicked = True
                     self._update(
                         monitor_id, status="monitoring", stage="authenticating",
-                        message="Conclua o login/MFA na janela do Firefox; o monitor continuará após o redirecionamento.",
+                        message=(
+                            "Email enviado; conclua a senha ou MFA na janela do Firefox."
+                            if email_submitted else
+                            "Conclua o login/MFA na janela do Firefox; o monitor continuará após o redirecionamento."
+                        ),
                         fields=fields, elapsed_seconds=round(monotonic() - started_at),
                         page_url=page_url, page_title=page_title,
                     )
@@ -1105,6 +1727,17 @@ class BmaPageMonitor(PlanningReadMixin):
                 driver.get(WOTRACK_URL)
             except TimeoutException:
                 pass
+            service._wait_for_work_tracking(
+                driver,
+                lambda _stage, message, *_: self._update(
+                    monitor_id,
+                    status="monitoring",
+                    stage="authenticating",
+                    message=message,
+                    page_url=driver.current_url,
+                    page_title=driver.title,
+                ),
+            )
             with self._lock:
                 session = self._sessions.get(monitor_id)
                 if session:
@@ -1139,11 +1772,230 @@ class BmaPageMonitor(PlanningReadMixin):
                     session["driver"] = None
             self._browser_lock.release()
 
+    def _run_preparation_collection(self, monitor_id: str, orders: list[dict]):
+        driver = None
+        started_at = monotonic()
+        completed = []
+        failed = []
+        rows_found = 0
+        empty_count = 0
+        self._browser_lock.acquire()
+        try:
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if not session or session["stop"].is_set():
+                    return
+            service = BMAService()
+            self._update(monitor_id, message="Abrindo Firefox para autenticar no BMA.", progress=5)
+            driver = service._create_browser(page_load_strategy="eager", headless=False)
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = driver
+            driver.set_page_load_timeout(service.timeout)
+            self._update(
+                monitor_id, status="monitoring", stage="authenticating", progress=5,
+                message="Conclua o login/MFA na janela do Firefox; a fila continuará após o acesso ao Maximo.",
+            )
+            if not self._wait_for_preparation_tracking(monitor_id, driver, service, started_at):
+                return
+
+            for index, order in enumerate(orders, start=1):
+                with self._lock:
+                    session = self._sessions.get(monitor_id)
+                    if not session or session["stop"].is_set():
+                        break
+                wonum = order["wonum"]
+                self._update(
+                    monitor_id,
+                    status="monitoring",
+                    stage="reading_preparation",
+                    progress=round((index - 1) / len(orders) * 100),
+                    message=f"Lendo Preparação da OT {wonum} ({index}/{len(orders)}).",
+                    current_order_index=index,
+                    current_wonum=wonum,
+                    elapsed_seconds=round(monotonic() - started_at),
+                )
+                try:
+                    self.pesquisar_ot(monitor_id, driver, wonum)
+                    grade = self._ler_grade_aba(monitor_id, driver, "Preparação", COLUNAS_PREPARACAO)
+                    lines = [
+                        line for line in grade.get("linhas", [])
+                        if any(str(line.get(column, "")).strip() for column in COLUNAS_PREPARACAO)
+                    ]
+                    salvar_mao_de_obra_preparacao(order["siteid"], wonum, lines)
+                    completed.append(wonum)
+                    if lines:
+                        rows_found += 1
+                    else:
+                        empty_count += 1
+                except Exception as exc:
+                    with self._lock:
+                        session = self._sessions.get(monitor_id)
+                        stopped = not session or session["stop"].is_set()
+                    if stopped:
+                        break
+                    failed.append({"wonum": wonum, "message": str(exc)[:300] or type(exc).__name__})
+
+                processed = len(completed) + len(failed)
+                self._update(
+                    monitor_id,
+                    progress=round(processed / len(orders) * 100),
+                    completed_wonums=completed.copy(),
+                    failed_wonums=failed.copy(),
+                    collected_count=len(completed),
+                    rows_found=rows_found,
+                    empty_count=empty_count,
+                    failed_count=len(failed),
+                    elapsed_seconds=round(monotonic() - started_at),
+                )
+
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                stopped = not session or session["stop"].is_set()
+            status = "stopped" if stopped else "completed"
+            message = (
+                f"Coleta de especialidades interrompida: {len(completed)} OT(s) lida(s), {len(failed)} falha(s)."
+                if stopped else
+                f"Coleta de especialidades concluída: {len(completed)} OT(s) lida(s), {rows_found} com linhas, "
+                f"{empty_count} sem linhas e {len(failed)} falha(s)."
+            )
+            self._update(
+                monitor_id,
+                status=status,
+                stage=status,
+                progress=round((len(completed) + len(failed)) / len(orders) * 100),
+                message=message,
+                completed_wonums=completed,
+                failed_wonums=failed,
+                collected_count=len(completed),
+                rows_found=rows_found,
+                empty_count=empty_count,
+                failed_count=len(failed),
+                current_wonum=None,
+                elapsed_seconds=round(monotonic() - started_at),
+            )
+        except Exception as exc:
+            self._update(
+                monitor_id,
+                status="failed",
+                stage="failed",
+                message=f"Coleta de Preparação interrompida: {str(exc)[:300] or type(exc).__name__}",
+            )
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = None
+                    if session["state"]["status"] in {"starting", "monitoring", "stopping"}:
+                        session["state"].update(status="stopped", message="Coleta de especialidades encerrada.")
+            self._browser_lock.release()
+
+    def _wait_for_preparation_tracking(self, monitor_id, driver, service, started_at) -> bool:
+        login_clicked = False
+        tracking_wait_started_at = None
+        direct_navigation_attempted = False
+        app_navigation_attempted = False
+        try:
+            driver.get(service.wotrack_url)
+        except TimeoutException:
+            pass
+
+        while True:
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if not session or session["stop"].is_set():
+                    return False
+            try:
+                driver.switch_to.default_content()
+                tracking_ready = service._find_work_tracking_search(driver)
+            except WebDriverException:
+                sleep(1)
+                continue
+
+            if tracking_ready:
+                service._wait_for_work_tracking(
+                    driver,
+                    lambda _stage, message, *_: self._update(
+                        monitor_id, stage="authenticating", message=message,
+                    ),
+                )
+                self._update(
+                    monitor_id, stage="wotrack_ready", progress=10,
+                    page_url=driver.current_url, page_title=driver.title,
+                    message="Rastrear Ordem de Trabalho aberto; iniciando a fila de Preparação.",
+                )
+                return True
+
+            page_url = driver.current_url
+            page_title = driver.title
+            if any(host in page_url for host in (
+                "auth.rbmanca4", "login-fed.michelin.com", "login.microsoftonline.com",
+            )):
+                tracking_wait_started_at = None
+                if not login_clicked:
+                    if service._advance_microsoft_email(driver):
+                        login_clicked = True
+                        self._update(monitor_id, stage="authenticating", message="Email enviado; aguardando senha ou MFA manual.")
+                    else:
+                        try:
+                            login_button = service._find_login_button(driver)
+                        except WebDriverException:
+                            login_button = None
+                        if login_button:
+                            self._update(monitor_id, stage="authenticating", message="Acionando o login do BMA.")
+                            login_button.click()
+                            login_clicked = True
+                message = "Conclua o login/MFA na janela do Firefox; a coleta continuará após o redirecionamento."
+                stage = "authenticating"
+            else:
+                if tracking_wait_started_at is None:
+                    tracking_wait_started_at = monotonic()
+                message = "Aguardando os controles do Rastrear Ordem de Trabalho aparecerem."
+                stage = "waiting_page"
+            self._update(
+                monitor_id, status="monitoring", stage=stage, message=message,
+                elapsed_seconds=round(monotonic() - started_at),
+                page_url=page_url, page_title=page_title,
+            )
+            elapsed = monotonic() - tracking_wait_started_at if tracking_wait_started_at is not None else 0
+            if not direct_navigation_attempted and elapsed >= 10:
+                direct_navigation_attempted = True
+                tracking_wait_started_at = monotonic()
+                self._update(
+                    monitor_id, stage="opening_app",
+                    message="Acessando diretamente o link do Rastreamento de Ordem de Trabalho.",
+                )
+                try:
+                    driver.get(service.wotrack_url)
+                except TimeoutException:
+                    pass
+                except WebDriverException:
+                    pass
+            elif direct_navigation_attempted and not app_navigation_attempted and elapsed >= 10:
+                app_navigation_attempted = True
+                try:
+                    app_opened = self._open_work_order_app(driver)
+                except WebDriverException:
+                    app_opened = False
+                if app_opened:
+                    self._update(
+                        monitor_id, stage="opening_app",
+                        message="Abrindo o aplicativo Work Order Tracking pelo menu do Maximo.",
+                    )
+            sleep(1)
+
     def _run_read_only(self, monitor_id: str, wonum: str, *, open_order=False):
         driver = None
         started_at = monotonic()
         submitted = False
         opened = False
+        email_submitted = False
         self._browser_lock.acquire()
         try:
             with self._lock:
@@ -1176,8 +2028,12 @@ class BmaPageMonitor(PlanningReadMixin):
                     fields = []
                 page_url = driver.current_url
                 page_title = driver.title
+                if "login.microsoftonline.com" in page_url and not email_submitted:
+                    email_submitted = service._advance_microsoft_email(driver)
                 authenticated = not (
-                    "auth.rbmanca4" in page_url or "login-fed.michelin.com" in page_url
+                    "auth.rbmanca4" in page_url
+                    or "login-fed.michelin.com" in page_url
+                    or "login.microsoftonline.com" in page_url
                 )
                 filter_error = None
                 if authenticated and not submitted:

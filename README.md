@@ -10,6 +10,15 @@ A criação automática de OT (SharePoint + Selenium) **não está implementada 
 - Backend: Python FastAPI, Pandas, OpenPyXL
 - Banco: SQLite (`database/data/bma_intranet.db`)
 
+## Instalador Windows
+
+A distribuicao local autocontida, o launcher sem console e o instalador por usuario
+estao em [distribution/windows/README.md](distribution/windows/README.md).
+O instalador foi configurado para **nao solicitar administrador**. A geracao final
+e a homologacao em Windows limpo ainda precisam ser concluidas. O build foi retomado
+em `C:\BUSAPPS`, confirmado pelo usuario como diretorio autorizado pela TI.
+Os comandos de desenvolvimento existentes permanecem separados do build desktop.
+
 ## Estrutura
 
 ```text

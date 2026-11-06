@@ -1,7 +1,7 @@
 import Head from "next/head";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CalendarDays, RefreshCw, Trash2 } from "lucide-react";
+import { CalendarDays, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
 import { deleteWorkPlan, listWorkPlans, type PlanSummary } from "@/services/pcm";
 import { formatPlanningDate } from "@/utils/laborPlanning";
 import { normalize } from "@/utils/orderFilters";
@@ -38,7 +38,7 @@ export default function FollowUpPage() {
     } finally { setDeleting(""); }
   }
   return <>
-    <Head><title>Acompanhar planejamentos | Centro PCM</title></Head>
+    <Head><title>Planejamentos | Planning & Scheduling Michelin</title></Head>
     <main className="pcm-workspace mx-auto min-h-screen max-w-[1600px] space-y-5 p-4 lg:p-8">
       <header className="pcm-panel flex flex-wrap items-center justify-between gap-4 p-6">
         <div><Link href="/planejamento" className="text-xs text-sky-300">← Coleta e novo planejamento</Link>
@@ -53,7 +53,7 @@ export default function FollowUpPage() {
       </div>
       {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
       {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
-      {loading ? <p role="status" className="text-slate-400">Carregando...</p> : <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {loading ? <p role="status" className="flex items-center gap-2 text-slate-400"><LoaderCircle size={17} className="animate-spin" /> Carregando planejamentos...</p> : <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {!visible.length && <p className="text-sm text-slate-400">Nenhum planejamento encontrado. Na carteira, defina a equipe e clique em Planejar PM ou Planejar Corretiva.</p>}
         {visible.map((p) => <article key={p.id} className="pcm-panel space-y-3 p-5">
           <div className="flex items-center justify-between"><span className="pcm-badge text-sky-200">{p.status === "confirmado" ? "Confirmado localmente" : "Rascunho"}</span><span className="text-xs text-slate-500">r{p.revisao}</span></div>
@@ -62,7 +62,7 @@ export default function FollowUpPage() {
           <p className="text-xs text-slate-400">Planejador: {p.planejador}<br />Última revisão: {new Date(p.atualizado_em).toLocaleString("pt-BR")}</p>
           <p className="text-xs text-slate-500">{p.motivo}</p>
           <div className="flex flex-wrap gap-2">
-            <Link href={{ pathname: "/planejamento/alocacao", query: { plano: p.id } }} className="pcm-primary-button inline-flex">Abrir cronograma e reprogramar →</Link>
+            <Link href={{ pathname: "/planejamento", query: { etapa: "3", plano: p.id } }} className="pcm-primary-button inline-flex">Abrir cronograma e reprogramar →</Link>
             <button type="button" aria-label={`Excluir planejamento ${p.inicio} a ${p.fim}`} title="Excluir planejamento e todas as revisões locais"
               disabled={!!deleting} onClick={() => void removePlan(p)} className="pcm-small-button border-rose-400/40 text-rose-300 hover:bg-rose-400/10 disabled:opacity-50">
               <Trash2 size={15} /> {deleting === p.id ? "Excluindo..." : "Excluir"}

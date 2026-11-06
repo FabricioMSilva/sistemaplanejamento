@@ -1,0 +1,32 @@
+{
+  "firefox": {
+    "version": "153.6.0esr",
+    "url": "https://archive.mozilla.org/pub/firefox/releases/153.6.0esr/win64/pt-BR/Firefox%20Setup%20153.6.0esr.exe",
+    "algorithm": "SHA512",
+    "hash": "bc681950298655c7fee383d9e8ad59802671bffa8d512121f55c072280b6e43e563b6b8524a97ae2d82a6bc702ccbeba19a30d0c817e2c1428f9fbcf696b9b08"
+  },
+  "geckodriver": {
+    "version": "0.37.1",
+    "url": "https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-win64.zip",
+    "algorithm": "SHA256",
+    "hash": "dfed9315abe8d2fbc1b6161a2ee8002452e79cf05ee92fdc653a4e26bc35edd8"
+  },
+  "sevenzipBootstrap": {
+    "version": "26.05",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe",
+    "algorithm": "SHA256",
+    "hash": "9bf582b894dfa665f852d7e9112b02290a1c303c2d95a21fcdc41ffcb03143b7"
+  },
+  "sevenzip": {
+    "version": "26.05",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-x64.exe",
+    "algorithm": "SHA256",
+    "hash": "fd99e86f57d8f429ef5ed045bf98315af962e2309b0f1ba87a147a44c71647d0"
+  },
+  "inno": {
+    "version": "7.1.1",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe",
+    "algorithm": "SHA256",
+    "hash": "8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0"
+  }
+}

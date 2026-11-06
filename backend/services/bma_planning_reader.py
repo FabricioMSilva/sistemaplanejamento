@@ -20,18 +20,18 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from models.database import listar_situacao_envios_bma, registrar_envio_bma
 from services.BMAService import BMAService, BMAServiceError
-from services.pcm_planning import get_plan, order_key, text
+from services.pcm_planning import get_plan, import_bma_schedule, order_key, text
+from utils.runtime_paths import uploads_dir
 
 # OTs preventivas (PM) tratadas neste fluxo.
 TIPOS_PM = {"I", "S"}
 TIPOS_ENVIO = TIPOS_PM | {"E"}
-# Corretivas nestes status recebem o planejamento e são roteadas no workflow até PREPARED.
+# OTs nestes status recebem o planejamento e podem ter o status alterado para PREPARED.
 STATUS_WORKFLOW = {"WFSCH", "WSCH"}
-OPCAO_WORKFLOW_PREPARED = "Pronta para execução - PREPARED"
-# Validado na observação: botão "Rotear Workflow" da barra de ferramentas.
-BOTAO_ROTEAR_WORKFLOW = "ROUTEWF_BMA-WF-WO_-tbb_image"
+MAX_ASSIGNMENTS_PER_ORDER = 5
+PREPARED_STATUS_OPTION = 'a[id$="_ns_menu_PREPARED_OPTION_a"]'
 
-PASTA_DIAGNOSTICO = Path(__file__).resolve().parents[1] / "uploads" / "bma_leitura"
+PASTA_DIAGNOSTICO = uploads_dir() / "bma_leitura"
 log = logging.getLogger("bma_envio")
 if not log.handlers:
     PASTA_DIAGNOSTICO.mkdir(parents=True, exist_ok=True)
@@ -67,8 +67,8 @@ CAMPOS_ORDEM = {
     "tipo_ordem": ("Tipo de trabalho",),  # CONFIRMAR
     "equipamento": ("Ativo",),  # CONFIRMAR
     "localizacao": ("Local",),  # CONFIRMAR
-    "inicio_desejado": ("Início desejado",),  # CONFIRMAR
-    "termino_desejado": ("Término desejado",),  # CONFIRMAR
+    "inicio_desejado": ("Não iniciar antes de", "Início desejado"),
+    "termino_desejado": ("Terminar antes de", "Término desejado"),
     "equipe_responsavel": ("Equipe",),  # CONFIRMAR
     "duracao_planejada": ("Duração",),  # CONFIRMAR
     "prioridade": ("Prioridade",),  # CONFIRMAR
@@ -79,6 +79,7 @@ COLUNAS_ATRIBUICAO = ("mao de obra", "inicio planejado", "horas")
 COLUNAS_PREPARACAO = ("especialidade", "quantidade", "horas normais")
 SITUACOES_PLANEJADOR = {"pendente_planejador"}
 SITUACOES_PLANEJADAS = {"planejada", "ja_planejada"}
+STATUS_TERMINAIS = {"COMP", "CLOSE", "CAN", "CANCELADA"}
 # Recarrega o Rastrear Ordem periodicamente para o Maximo não acumular memória em filas longas (até 200 OTs).
 OTS_POR_RECARGA = 25
 SITUACOES_ERRO = {"erro", "nao_encontrada"}
@@ -142,6 +143,10 @@ class FalhaGravacao(BMAServiceError):
     pass
 
 
+class MatriculaNaoConfirmada(BMAServiceError):
+    pass
+
+
 class WorkflowIndisponivel(BMAServiceError):
     pass
 
@@ -152,7 +157,8 @@ def resultado_ot(numero_ot: str, **valores) -> dict:
         "equipamento": "", "localizacao": "", "data_planejada": "", "inicio_planejado": "",
         "termino_planejado": "", "janela_execucao": "", "dia_execucao": "", "executor": "",
         "equipe_responsavel": "", "duracao_planejada": "", "prioridade": "",
-        "dados_adicionais": {}, "situacao_consulta": "sucesso", "erro": None,
+        "dados_adicionais": {}, "requisitos_mao_de_obra": [],
+        "situacao_consulta": "sucesso", "erro": None,
     }
     resultado.update(valores)
     return resultado
@@ -205,6 +211,145 @@ def obter_ots_do_cronograma(plan_id: str) -> list[dict]:
 
 class PlanningReadMixin:
     """Fluxo de envio do planejamento incorporado ao BmaPageMonitor."""
+
+    def importar_planejamento_bma(self, plan_id: str):
+        plan = get_plan(plan_id)
+        if plan["status"] != "rascunho":
+            raise BMAServiceError("Importe o planejamento do BMA em um rascunho não confirmado.")
+        monitor_id, driver_reutilizavel = self._nova_sessao_bma({
+            "mode": "planning_import", "inspection_only": True, "plan_id": plan_id,
+            "selected_wonums": [], "queue_total": 0,
+            "processadas": 0, "com_erro": 0, "importadas": [], "avisos_importacao": [],
+            "import_applied": False, "resultados": [],
+        }, reutilizar=False)
+        Thread(
+            target=self._executar_importacao_planejamento_bma,
+            args=(monitor_id, plan_id, plan["setores"], plan["inicio"], plan["fim"], driver_reutilizavel), daemon=True,
+        ).start()
+        return {"monitor_id": monitor_id, "total": 0}
+
+    def _executar_importacao_planejamento_bma(
+        self, monitor_id: str, plan_id: str, setores: list[str], inicio: str, fim: str, driver_existente=None,
+    ):
+        driver = None
+        hidden = os.getenv("BMA_ENVIO_VISIVEL", "1") != "1"
+        close_browser = hidden
+        started_at = monotonic()
+        self._browser_lock.acquire()
+        try:
+            driver, reused = self.iniciar_firefox_bma(monitor_id, driver_existente, headless=hidden)
+            self.acessar_rastreamento_ordem(monitor_id, driver, reused)
+            service = BMAService()
+            ots = service.coletar_ots_programadas(
+                setores, inicio, fim,
+                lambda stage, message, page, count: self._update(
+                    monitor_id, stage=stage, page_atual=page, message=message,
+                    progress=max(5, min(10, 5 + (page or 0))),
+                ),
+                driver=driver,
+            )
+            self._update(
+                monitor_id, queue_total=len(ots), selected_wonums=[order["wonum"] for order in ots],
+                progress=10, message=f"{len(ots)} OT(s) programada(s) encontradas no BMA para o período.",
+            )
+            if not ots:
+                self._update(
+                    monitor_id, status="completed", stage="completed", progress=100,
+                    elapsed_seconds=round(monotonic() - started_at),
+                    message="Nenhuma OT programada foi encontrada no BMA com os filtros selecionados.",
+                )
+                return
+            results = []
+            for index, order in enumerate(ots, start=1):
+                self._verificar_interrupcao(monitor_id)
+                number = order["wonum"]
+                if index > 1 and (index - 1) % OTS_POR_RECARGA == 0:
+                    self.acessar_rastreamento_ordem(monitor_id, driver)
+                self._update(
+                    monitor_id, stage="reading_order", current_order_index=index, current_wonum=number,
+                    progress=10 + round(80 * (index - 1) / len(ots)),
+                    message=f"Lendo programação da OT {number} no BMA...",
+                )
+                try:
+                    for attempt in (1, 2):
+                        try:
+                            self.pesquisar_ot(monitor_id, driver, number)
+                            result = self.extrair_dados_planejamento_ot(monitor_id, driver, number)
+                            result["siteid"] = order["siteid"]
+                            result["ordem_bma"] = order
+                            result["status"] = result.get("status") or text(order, "status")
+                            result["inicio_planejado"] = result.get("inicio_planejado") or text(order, "schedstart")
+                            result["termino_planejado"] = result.get("termino_planejado") or text(order, "schedfinish")
+                            result["duracao_planejada"] = result.get("duracao_planejada") or text(order, "estdur")
+                            result["situacao_consulta"] = "sucesso"
+                            break
+                        except SessaoBmaExpirada:
+                            if attempt == 2:
+                                raise
+                            self._update(
+                                monitor_id, stage="authenticating",
+                                message="Sessão BMA expirada. Conclua o login/MFA; a leitura continuará.",
+                            )
+                            self.acessar_rastreamento_ordem(monitor_id, driver)
+                except (LeituraInterrompida, NavegadorIndisponivel):
+                    raise
+                except (BMAServiceError, WebDriverException) as exc:
+                    detail = (str(exc).strip().splitlines() or [type(exc).__name__])[0][:240]
+                    result = resultado_ot(number, situacao_consulta="erro", erro=detail)
+                    if index < len(ots):
+                        self._recuperar_tela(monitor_id, driver, number)
+                results.append(result)
+                errors = sum(item["situacao_consulta"] == "erro" for item in results)
+                self._update(
+                    monitor_id, processadas=len(results), com_erro=errors, resultados=deepcopy(results),
+                    progress=10 + round(80 * len(results) / len(ots)),
+                    message=f"OT {number}: {result.get('erro') or 'programação lida.'}",
+                )
+            self._update(
+                monitor_id, status="completed", stage="completed", progress=100,
+                elapsed_seconds=round(monotonic() - started_at),
+                message=(f"Leitura concluída: {len(results)} OT(s) coletada(s). Revise os dados e clique em "
+                         "Colocar no cronograma para aplicar as atribuições localmente. Nenhuma alteração foi enviada ao BMA."),
+            )
+        except LeituraInterrompida:
+            close_browser = True
+            self._update(monitor_id, status="stopped", stage="stopped", message="Importação cancelada; plano local não alterado.")
+        except BaseException as exc:
+            log.exception("[%s] importação reversa do BMA falhou", monitor_id)
+            self._update(
+                monitor_id, status="failed", stage="failed", failed_wonum=(self.get(monitor_id) or {}).get("current_wonum"),
+                elapsed_seconds=round(monotonic() - started_at), message=f"Importação interrompida: {exc}",
+            )
+        finally:
+            if close_browser and driver:
+                self._close_browser(driver)
+            with self._lock:
+                session = self._sessions.get(monitor_id)
+                if session:
+                    session["driver"] = None if close_browser else driver
+            self._browser_lock.release()
+
+    def aplicar_importacao_planejamento_bma(self, monitor_id: str, plan_id: str):
+        with self._lock:
+            session = self._sessions.get(monitor_id)
+            if not session:
+                raise BMAServiceError("A coleta do BMA não foi encontrada. Faça uma nova leitura.")
+            state = session["state"]
+            if state.get("mode") != "planning_import" or state.get("plan_id") != plan_id:
+                raise BMAServiceError("A coleta não pertence a este planejamento.")
+            if state.get("status") != "completed":
+                raise BMAServiceError("Aguarde a coleta das OTs terminar antes de colocá-las no cronograma.")
+            if state.get("import_applied"):
+                return deepcopy(state)
+
+            imported = import_bma_schedule(plan_id, deepcopy(state.get("resultados", [])))
+            state.update(
+                importadas=imported["importadas"], avisos_importacao=imported["avisos"],
+                plan_revision=imported["plano"]["revisao"], import_applied=True,
+                message=(f"Cronograma atualizado: {len(imported['importadas'])} OT(s) colocada(s) localmente; "
+                         f"{len(imported['avisos'])} aviso(s). Nenhuma alteração foi enviada ao BMA."),
+            )
+            return deepcopy(state)
 
     def enviar_planejamento(self, plan_id: str):
         ots = obter_ots_do_cronograma(plan_id)
@@ -355,7 +500,7 @@ class PlanningReadMixin:
 
     def _executar_leitura_planejamento(self, monitor_id: str, ots: list[dict], driver_existente=None):
         driver = None
-        oculto = os.getenv("BMA_ENVIO_VISIVEL", "0") != "1"
+        oculto = os.getenv("BMA_ENVIO_VISIVEL", "1") != "1"
         fechar_navegador = oculto
         started_at = monotonic()
         log.info("[%s] envio iniciado (%s): %s", monitor_id, "oculto" if oculto else "visível",
@@ -416,12 +561,14 @@ class PlanningReadMixin:
             if session:
                 session["driver"] = driver
 
-    def acessar_rastreamento_ordem(self, monitor_id: str, driver, reutilizado: bool = False):
+    def acessar_rastreamento_ordem(
+        self, monitor_id: str, driver, reutilizado: bool = False, *, service: BMAService | None = None,
+    ):
         self._verificar_interrupcao(monitor_id)
         self._update(
             monitor_id, stage="opening_wotrack", progress=5, message="Acessando Rastrear Ordem de Trabalho...",
         )
-        service = BMAService()
+        service = service or BMAService()
         driver.switch_to.default_content()
         if reutilizado and self._campo_busca(monitor_id, driver):
             driver.switch_to.default_content()
@@ -574,26 +721,65 @@ class PlanningReadMixin:
         inicio = self._valor_campo(campos, CAMPOS_ORDEM["inicio_planejado"])
         termino = self._valor_campo(campos, CAMPOS_ORDEM["termino_planejado"])
         status = self._valor_campo(campos, CAMPOS_ORDEM["status"]).strip().upper()
-        rotear = ot.get("tipo") == "E" and status in STATUS_WORKFLOW
-        if ot.get("tipo") == "E" and status != "PREPARED" and not rotear:
+        if status in STATUS_TERMINAIS:
+            return pendente(f"OT com status {status}; não será alterada. Revise o estado no BMA.", status=status)
+        rotear = status in STATUS_WORKFLOW
+        if ot.get("tipo") == "E" and status not in {"PREPARED", "INPRG", *STATUS_WORKFLOW}:
             return pendente(f"Corretiva com status {status or 'não identificado'}; só PREPARED, WFSCH ou WSCH. OT não alterada.")
+        grade = None
+        if status == "INPRG":
+            grade = self._ler_grade_aba(monitor_id, driver, "Atribuições", COLUNAS_ATRIBUICAO)
+            executores_em_execucao = [linha.get("mao de obra", "").strip().upper() for linha in grade["linhas"]]
+            if (self._parse_maximo_datetime(inicio) and self._parse_maximo_datetime(termino)
+                    and any(executores_em_execucao)):
+                return resultado_ot(
+                    numero, situacao_consulta="ja_planejada", status=status, inicio_planejado=inicio,
+                    termino_planejado=termino, executor=", ".join(c for c in executores_em_execucao if c),
+                    erro="OT em execução com período planejado e executante informado; nenhuma alteração feita.",
+                )
+            return pendente(
+                "OT INPRG sem início, fim ou executante completo; não será alterada durante a execução.",
+                status=status,
+            )
         if plano["sem_matricula"]:
             return pendente(f"Executante(s) sem matrícula válida no cronograma: {', '.join(plano['sem_matricula'])}.")
 
         self._update(monitor_id, message=f"OT {numero}: conferindo quantidade de mão de obra na Preparação...")
         preparacao = self._ler_grade_aba(monitor_id, driver, "Preparação", COLUNAS_PREPARACAO)
         quantidade = sum(self._numero(linha.get("quantidade")) for linha in preparacao["linhas"])
+        requisitos_mao_de_obra = [{
+            "especialidade": str(linha.get("especialidade") or "").strip(),
+            "orgid": str(linha.get("orgid") or "").strip(),
+            "quantidade": self._numero(linha.get("quantidade")),
+            "horas_normais": str(linha.get("horas normais") or "").strip(),
+        } for linha in preparacao["linhas"]]
         matriculas = ", ".join(a["laborcode"] for a in atribuicoes)
+        if quantidade > MAX_ASSIGNMENTS_PER_ORDER:
+            return pendente(
+                f"O BMA exige {quantidade} pessoas, acima do limite automatizado de "
+                f"{MAX_ASSIGNMENTS_PER_ORDER}. OT não alterada.",
+                requisitos_mao_de_obra=requisitos_mao_de_obra,
+            )
         if quantidade != len(atribuicoes):
             return pendente(
                 f"O BMA (Preparação) exige {quantidade} pessoa(s) e o cronograma tem {len(atribuicoes)} "
                 f"matrícula(s) ({matriculas}). OT não alterada.",
+                requisitos_mao_de_obra=requisitos_mao_de_obra,
             )
-        grade = self._ler_grade_aba(monitor_id, driver, "Atribuições", COLUNAS_ATRIBUICAO)
-        if len(grade["linhas"]) != len(atribuicoes):
+        grade = grade or self._ler_grade_aba(monitor_id, driver, "Atribuições", COLUNAS_ATRIBUICAO)
+        if len(grade["linhas"]) < len(atribuicoes):
+            try:
+                grade = self._garantir_linhas_atribuicao(monitor_id, driver, numero, len(atribuicoes))
+            except BMAServiceError as exc:
+                return pendente(
+                    f"Não foi possível preparar linhas suficientes em Atribuições: {exc}",
+                    status=status, requisitos_mao_de_obra=requisitos_mao_de_obra,
+                )
+        if len(grade["linhas"]) < len(atribuicoes):
             return pendente(
-                f"A aba Atribuições tem {len(grade['linhas'])} linha(s) e o cronograma tem "
+                f"A aba Atribuições ficou com {len(grade['linhas'])} linha(s) e o cronograma tem "
                 f"{len(atribuicoes)} matrícula(s). OT não alterada.",
+                requisitos_mao_de_obra=requisitos_mao_de_obra,
             )
         # O planejamento é a referência: o que já confere fica, o que diverge é corrigido.
         inicio_plano = datetime.fromisoformat(f"{plano['inicio']}T00:01:00")
@@ -601,7 +787,7 @@ class PlanningReadMixin:
         inicio_atual = self._parse_maximo_datetime(inicio)
         fim_atual = self._parse_maximo_datetime(termino)
         # O Maximo recalcula o Final planejado pela duração; basta ficar dentro do período planejado.
-        datas_ok = inicio_atual == inicio_plano and bool(fim_atual) and inicio_plano <= fim_atual <= fim_plano
+        datas_ok = inicio_atual == inicio_plano and fim_atual == fim_plano
         existentes = [linha.get("mao de obra", "").strip().upper() for linha in grade["linhas"]]
         usadas, linhas_alvo, faltando = set(), [], []
         for atribuicao in atribuicoes:
@@ -618,11 +804,12 @@ class PlanningReadMixin:
         linhas_alvo += [(i, atribuicao, True) for i, atribuicao in zip(livres, faltando)]
         observacoes = [f"matrícula {existentes[i]} substituída por {a['laborcode']}"
                        for i, a, troca in linhas_alvo if troca and existentes[i]]
-        if datas_ok and not linhas_alvo and not rotear:
+        if (status in {"PREPARED", *STATUS_WORKFLOW} and inicio_atual and fim_atual
+                and not faltando):
             return resultado_ot(
                 numero, situacao_consulta="ja_planejada", status=status, inicio_planejado=inicio,
                 termino_planejado=termino, executor=", ".join(c for c in existentes if c),
-                erro="Já estava conforme o planejamento (datas e matrículas). OT não alterada.",
+                erro="Datas e matrículas do cronograma já preenchidas. OT não alterada.",
             )
 
         try:
@@ -639,7 +826,12 @@ class PlanningReadMixin:
                 self._update(monitor_id, stage="saving_assignments",
                              message=f"OT {numero}: ajustando matrícula(s) {matriculas} em Atribuições...")
                 self._ler_grade_aba(monitor_id, driver, "Atribuições", COLUNAS_ATRIBUICAO)
-                for indice, atribuicao, preencher_matricula in linhas_alvo:
+                for posicao, (indice, atribuicao, preencher_matricula) in enumerate(linhas_alvo, start=1):
+                    self._update(
+                        monitor_id,
+                        message=f"OT {numero}: executante {posicao}/{len(linhas_alvo)} "
+                        f"({atribuicao['laborcode']}) na linha {indice + 1} de Atribuições...",
+                    )
                     self._preencher_atribuicao(monitor_id, driver, indice, atribuicao, matricula=preencher_matricula)
                 self._salvar_e_aguardar(monitor_id, driver, f"atribuições da OT {numero}")
             self._update(monitor_id, stage="verifying",
@@ -648,9 +840,9 @@ class PlanningReadMixin:
             aviso_workflow = None
             if rotear:
                 self._update(monitor_id, stage="workflow",
-                             message=f"OT {numero}: Rotear Workflow → {OPCAO_WORKFLOW_PREPARED}...")
+                             message=f"OT {numero}: Alterar Status para Prepared...")
                 try:
-                    self._rotear_workflow_prepared(monitor_id, driver, numero)
+                    self._alterar_status_prepared(monitor_id, driver, numero)
                 except WorkflowIndisponivel as exc:
                     aviso_workflow = str(exc)
             final = self.extrair_dados_planejamento_ot(monitor_id, driver, numero)
@@ -665,12 +857,55 @@ class PlanningReadMixin:
         if aviso_workflow:
             final.update(situacao_consulta="pendente_planejador", erro=aviso_workflow)
             return final
+        status_final = str(final.get("status") or "").strip().upper()
+        if status_final not in {"PREPARED", "INPRG"}:
+            final.update(
+                situacao_consulta="pendente_planejador",
+                erro=f"Dados conferidos, mas status final {status_final or 'não identificado'} não é PREPARED.",
+            )
+            return final
         final["situacao_consulta"] = "planejada"
         observacoes += [f"aviso do BMA {mensagem}" for mensagem in mensagens]
         if observacoes:
             final["dados_adicionais"]["observacoes"] = observacoes
             final["erro"] = f"Planejada com observações: {'; '.join(observacoes)}."
         return final
+
+    def _garantir_linhas_atribuicao(self, monitor_id: str, driver, numero_ot: str, quantidade: int) -> dict:
+        if quantidade > MAX_ASSIGNMENTS_PER_ORDER:
+            raise BMAServiceError(
+                f"A OT {numero_ot} exige {quantidade} linhas, acima do limite de {MAX_ASSIGNMENTS_PER_ORDER}.",
+            )
+        self._verificar_leitura(monitor_id, driver)
+        self._switch_to_manage_frame(driver)
+        self._click_tab(driver, "Atribuições")
+        grade = self._find_assignment_grid(driver)
+        while len(grade[2]) < quantidade:
+            anterior = len(grade[2])
+            botao = next((element for element in driver.find_elements(
+                By.CSS_SELECTOR, 'a[title="New Row"]',
+            ) if element.is_displayed() and element.is_enabled()), None)
+            if not botao:
+                raise BMAServiceError(f"Não foi possível adicionar linha de atribuição na OT {numero_ot}.")
+            self._click_when_idle(driver, botao)
+
+            def nova_linha(d):
+                self._verificar_leitura(monitor_id, d)
+                self._switch_to_manage_frame(d)
+                self._click_tab(d, "Atribuições")
+                atual = self._find_assignment_grid(d)
+                return atual if len(atual[2]) > anterior else False
+
+            grade = self._aguardar(
+                driver, nova_linha, 30,
+                f"A nova linha de atribuição não apareceu na OT {numero_ot}.",
+            )
+        self._switch_to_manage_frame(driver)
+        self._click_tab(driver, "Atribuições")
+        resultado = self._ler_grade(driver, COLUNAS_ATRIBUICAO)
+        if not resultado:
+            raise BMAServiceError(f"Não foi possível ler as linhas de atribuição da OT {numero_ot}.")
+        return resultado
 
     def _dialogo_workflow(self, driver, acao: str):
         return driver.execute_script("""
@@ -694,80 +929,66 @@ class PlanningReadMixin:
             return botao ? { ok: true, botao } : { ok: false };
         """, acao)
 
-    def _rotear_workflow_prepared(self, monitor_id: str, driver, numero_ot: str):
-        def botao_workflow(d):
+    def _alterar_status_prepared(self, monitor_id: str, driver, numero_ot: str):
+        def acao_status(d):
             self._verificar_leitura(monitor_id, d)
             self._switch_to_manage_frame(d)
-            return next((item for item in d.find_elements(By.ID, BOTAO_ROTEAR_WORKFLOW) if item.is_displayed()), None)
+            return next((item for item in d.find_elements(By.CSS_SELECTOR, PREPARED_STATUS_OPTION)
+                         if item.is_displayed() and item.is_enabled()), None)
 
-        def dialogo_aberto(d):
+        acao = self._aguardar(
+            driver, acao_status, 30,
+            "A ação 'Alterar Status para Prepared' não está disponível na OT.",
+        )
+        self._click_when_idle(driver, acao)
+
+        def confirmacao_status(d):
             self._verificar_leitura(monitor_id, d)
             self._switch_to_manage_frame(d)
-            return self._dialogo_workflow(d, "ler")
+            fields = self._ler_campos_rotulados(d)
+            novo_status = self._valor_campo(fields, ("Novo status",)).upper()
+            if novo_status != "PREPARED":
+                return False
+            confirmar = next((item for item in d.find_elements(By.XPATH, "//*[@role='button' or self::button]")
+                              if item.is_displayed() and self._normalize_text(item.text) == "ok"), None)
+            return confirmar
 
-        dialogo = None
-        for tentativa in range(3):
-            botao = self._aguardar(driver, botao_workflow, 30, "Botão Rotear Workflow não encontrado.")
-            if tentativa == 0:
-                self._click_when_idle(driver, botao)
-            else:
-                self._wait_maximo_idle(driver)
-                driver.execute_script("(arguments[0].closest('a') || arguments[0]).click();", botao)
-            try:
-                dialogo = self._aguardar(driver, dialogo_aberto, 10, "A janela do workflow não abriu.")
-                break
-            except (LeituraInterrompida, NavegadorIndisponivel, SessaoBmaExpirada):
-                raise
-            except BMAServiceError:
-                log.info("[%s] OT %s: janela do workflow não abriu (tentativa %s)", monitor_id, numero_ot, tentativa + 1)
-        if not dialogo:
-            raise BMAServiceError("A janela do workflow não abriu após 3 tentativas de clicar em Rotear Workflow.")
-        log.info("[%s] OT %s workflow: %s", monitor_id, numero_ot, dialogo["texto"][:200])
-        opcao = self._dialogo_workflow(driver, f"opcao:{OPCAO_WORKFLOW_PREPARED}")
-        if not opcao or not opcao.get("ok"):
-            cancelar = self._dialogo_workflow(driver, "botao:Cancelar")
-            if cancelar and cancelar.get("ok"):
-                self._click_when_idle(driver, cancelar["botao"])
-            raise WorkflowIndisponivel(
-                f"Datas e matrículas gravadas, mas o workflow não ofereceu '{OPCAO_WORKFLOW_PREPARED}' "
-                f"(janela: {' '.join(dialogo['texto'].split())[:160]}). Workflow cancelado; conclua manualmente.",
-            )
-        self._click_when_idle(driver, opcao["label"])
-        if opcao.get("input") and not opcao["input"].is_selected():
-            self._click_when_idle(driver, opcao["input"])
-        confirmar = self._dialogo_workflow(driver, "botao:OK")
-        if not confirmar or not confirmar.get("ok"):
-            raise BMAServiceError("Botão OK da janela do workflow não encontrado.")
-        self._click_when_idle(driver, confirmar["botao"])
-        ultimo = {}
+        confirmar = self._aguardar(
+            driver, confirmacao_status, 30,
+            "O diálogo de status não confirmou 'Novo status: Prepared'.",
+        )
+        self._click_when_idle(driver, confirmar)
+        ultimo_status = {}
 
         def preparado(d):
             self._verificar_leitura(monitor_id, d)
             self._switch_to_manage_frame(d)
-            ultimo["dialogo"] = self._dialogo_workflow(d, "ler")
-            ultimo["status"] = self._valor_campo(self._ler_campos_rotulados(d), CAMPOS_ORDEM["status"]).upper()
-            return not ultimo["dialogo"] and ultimo["status"] == "PREPARED"
+            ultimo_status["valor"] = self._valor_campo(self._ler_campos_rotulados(d), CAMPOS_ORDEM["status"]).upper()
+            return ultimo_status["valor"] == "PREPARED"
 
         try:
-            self._aguardar(driver, preparado, 60, "O status não mudou para PREPARED após o workflow.")
+            self._aguardar(driver, preparado, 60, "O status não mudou para PREPARED após a confirmação.")
         except BMAServiceError as exc:
-            dialogo = (ultimo.get("dialogo") or {}).get("texto", "")
             raise BMAServiceError(
-                f"{exc} Status atual: {ultimo.get('status') or '—'}."
-                + (f" Janela aberta: {' '.join(dialogo.split())[:160]}" if dialogo else ""),
+                f"{exc} Status atual: {ultimo_status.get('valor') or '—'}.",
             ) from exc
-        log.info("[%s] OT %s roteada para PREPARED", monitor_id, numero_ot)
+        log.info("[%s] OT %s alterada para PREPARED", monitor_id, numero_ot)
 
     def _input_atribuicao(self, driver, linha: int, coluna: str):
         self._switch_to_manage_frame(driver)
         grade = self._ler_grade(driver, COLUNAS_ATRIBUICAO)
         if not grade or linha >= len(grade["linhas"]):
             return None
+        input_id = f"{grade['prefixo']}_tdrow_[C:{grade['colunas'][coluna]}]_txt-tb[R:{linha}]"
+        campo = next((item for item in driver.find_elements(By.ID, input_id)
+                      if item.is_displayed() and item.is_enabled()), None)
+        if campo:
+            return campo
         celula = driver.find_element(
             By.ID, f"{grade['prefixo']}_tdrow_[C:{grade['colunas'][coluna]}]-c[R:{linha}]",
         )
-        campos = celula.find_elements(By.CSS_SELECTOR, "input")
-        return campos[0] if campos else None
+        return next((item for item in celula.find_elements(By.CSS_SELECTOR, "input")
+                     if item.is_displayed() and item.is_enabled()), None)
 
     def _preencher_celula(self, monitor_id: str, driver, linha: int, coluna: str, valor: str, conferir):
         def campo(d):
@@ -778,8 +999,26 @@ class PlanningReadMixin:
             self._verificar_leitura(monitor_id, d)
             return conferir(self._input_value(self._input_atribuicao(d, linha, coluna)))
 
-        self._replace_input(self._aguardar(driver, campo, 30, f"Campo {coluna} da linha {linha + 1} ausente."), valor)
-        self._aguardar(driver, aceito, 30, f"O BMA não aceitou '{valor}' em {coluna} (linha {linha + 1}).")
+        tentativa = 0
+        while True:
+            self._verificar_leitura(monitor_id, driver)
+            tentativa += 1
+            self._replace_input(
+                self._aguardar(driver, campo, 30, f"Campo {coluna} da linha {linha + 1} ausente."), valor,
+                focus_on_table_filter_interception=True,
+            )
+            try:
+                self._aguardar(
+                    driver, aceito, 30, f"O valor '{valor}' não permaneceu em {coluna} (linha {linha + 1}).",
+                    MatriculaNaoConfirmada if coluna == "mao de obra" else BMAServiceError,
+                )
+                return
+            except MatriculaNaoConfirmada:
+                self._update(
+                    monitor_id,
+                    message=f"Matrícula {valor} não confirmada na linha {linha + 1}; "
+                    f"tentando novamente (tentativa {tentativa + 1}).",
+                )
 
     def _preencher_atribuicao(self, monitor_id: str, driver, linha: int, atribuicao: dict, *, matricula=True):
         dia = date.fromisoformat(atribuicao["dia"])
@@ -882,7 +1121,7 @@ class PlanningReadMixin:
             numero_ot,
             descricao=valor("descricao"), tipo_ordem=valor("tipo_ordem"), status=valor("status"),
             equipamento=valor("equipamento"), localizacao=valor("localizacao"),
-            data_planejada=inicio_desejado or self._dia_maximo(inicio),
+            data_planejada=self._dia_maximo(inicio),
             inicio_planejado=inicio, termino_planejado=termino, janela_execucao=janela,
             dia_execucao=", ".join(dias), executor=", ".join(executores),
             equipe_responsavel=valor("equipe_responsavel"), duracao_planejada=valor("duracao_planejada"),
@@ -946,7 +1185,79 @@ class PlanningReadMixin:
             )
             if resultado["situacao_consulta"] == "erro" and indice < total:
                 self._recuperar_tela(monitor_id, driver, numero)
+        pendentes_mao_de_obra = [
+            item for item in resultados
+            if item["situacao_consulta"] == "pendente_planejador" and item.get("requisitos_mao_de_obra")
+        ]
+        if pendentes_mao_de_obra and envio.get("plan_id"):
+            self._reprocessar_pendencias_mao_de_obra(monitor_id, driver, ots, resultados)
         return resultados
+
+    def _reprocessar_pendencias_mao_de_obra(self, monitor_id: str, driver, ots: list[dict], resultados: list[dict]):
+        try:
+            atualizadas = {ot["numero_ot"]: ot for ot in obter_ots_do_cronograma((self.get(monitor_id) or {})["plan_id"])}
+        except (LookupError, KeyError):
+            return
+        originais = {ot["numero_ot"]: ot for ot in ots}
+        for indice, resultado_anterior in enumerate(list(resultados)):
+            numero = resultado_anterior["numero_ot"]
+            if (resultado_anterior["situacao_consulta"] != "pendente_planejador"
+                    or not resultado_anterior.get("requisitos_mao_de_obra")):
+                continue
+            original, atualizada = originais.get(numero), atualizadas.get(numero)
+            if not original or not atualizada:
+                continue
+            assinatura = lambda ot: sorted(
+                (str(item.get("laborcode", "")).strip().upper(), str(item.get("dia", "")))
+                for item in ot.get("planejamento", {}).get("atribuicoes", [])
+            )
+            if assinatura(original) == assinatura(atualizada):
+                continue
+            self._verificar_interrupcao(monitor_id)
+            self._update(monitor_id, stage="rechecking_labor", current_wonum=numero,
+                         message=f"OT {numero}: conferindo a equipe escolhida pelo planejador...")
+            for tentativa in (1, 2):
+                try:
+                    resultado = self.planejar_ot(monitor_id, driver, atualizada)
+                    break
+                except SessaoBmaExpirada:
+                    if tentativa == 2:
+                        raise
+                    self._update(monitor_id, stage="authenticating", message=(
+                        f"Sessão do BMA expirou durante a revisão da OT {numero}. "
+                        "Conclua o login/MFA no Firefox; a conferência continuará."
+                    ))
+                    self.acessar_rastreamento_ordem(monitor_id, driver)
+                except (LeituraInterrompida, NavegadorIndisponivel):
+                    raise
+                except FalhaGravacao as exc:
+                    resultado = resultado_ot(numero, situacao_consulta="erro", erro=str(exc))
+                    break
+                except OtNaoEncontrada as exc:
+                    resultado = resultado_ot(numero, situacao_consulta="nao_encontrada", erro=str(exc))
+                    break
+                except (BMAServiceError, WebDriverException) as exc:
+                    detalhe = (str(exc).strip().splitlines() or [type(exc).__name__])[0][:240]
+                    resultado = resultado_ot(numero, situacao_consulta="erro", erro=detalhe)
+                    break
+            resultado["dados_adicionais"]["cronograma_local"] = atualizada["cronograma"]
+            if resultado["situacao_consulta"] in SITUACOES_ERRO:
+                resultado["dados_adicionais"]["captura_tela"] = self._salvar_captura(driver, numero)
+            try:
+                registrar_envio_bma(monitor_id, (self.get(monitor_id) or {}).get("plan_id", ""), resultado)
+            except sqlite3.Error as exc:
+                resultado["dados_adicionais"]["aviso_historico"] = f"Histórico não gravado: {exc}"
+            resultados[indice] = resultado
+            situacoes = [item["situacao_consulta"] for item in resultados]
+            self._update(
+                monitor_id, resultados=deepcopy(resultados),
+                planejadas=sum(1 for status in situacoes if status in SITUACOES_PLANEJADAS),
+                pendentes=sum(1 for status in situacoes if status in SITUACOES_PLANEJADOR),
+                com_erro=sum(1 for status in situacoes if status in SITUACOES_ERRO),
+                completed_wonums=[item["numero_ot"] for item in resultados
+                                  if item["situacao_consulta"] == "planejada"],
+                message=f"OT {numero}: {resultado['erro'] or 'equipe atualizada e conferida no BMA'}",
+            )
 
     def _recuperar_tela(self, monitor_id: str, driver, numero_ot: str):
         # Recarregar o Rastrear Ordem descarta alterações não salvas e janelas abertas da OT com erro.
@@ -1018,7 +1329,7 @@ class PlanningReadMixin:
 
     @staticmethod
     def _salvar_captura(driver, numero_ot: str):
-        pasta = Path(__file__).resolve().parents[1] / "uploads" / "bma_leitura"
+        pasta = uploads_dir() / "bma_leitura"
         try:
             pasta.mkdir(parents=True, exist_ok=True)
             driver.switch_to.default_content()
@@ -1040,7 +1351,9 @@ class PlanningReadMixin:
             url = driver.current_url
         except (NoSuchWindowException, InvalidSessionIdException) as exc:
             raise NavegadorIndisponivel("A janela do Firefox usada pela leitura foi fechada.") from exc
-        if "auth.rbmanca4" in url or "login-fed.michelin.com" in url:
+        if any(host in url for host in (
+            "auth.rbmanca4", "login-fed.michelin.com", "login.microsoftonline.com",
+        )):
             raise SessaoBmaExpirada("A sessão do BMA expirou; é necessário refazer o login/MFA.")
 
     @staticmethod

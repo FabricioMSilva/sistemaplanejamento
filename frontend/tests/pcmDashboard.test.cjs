@@ -18,7 +18,7 @@ function load(name) {
   cache.set(file, m.exports);
   return m.exports;
 }
-const { buildDashboard, daysBetween, localDate, numericField, orderInPeriod } = load("pcmDashboard");
+const { buildDashboard, daysBetween, localDate, numericField, orderInPeriod, preparationOrders, specialtyPareto } = load("pcmDashboard");
 const { cellText, hasExistingPlanningInfo } = load("orderFilters");
 function order(wonum, dados = {}, status = "PREPARED") {
   return { wonum, siteid: "RES", status, maintenanceshop: "RES-TC-NF", sincronizado_em: "2026-10-22T19:00:00Z", dados: { lead: "", ...dados } };
@@ -81,15 +81,15 @@ test("six-hour selected dates feed executive total and daily capacity, not the s
 test("period portfolio includes target or scheduled dates inside and intervals crossing the horizon", () => {
   const range = { inicio: "2026-11-02", fim: "2026-11-06" };
   const rows = [
-    order("target-start", { targstartdate: "2026-11-01T00:00:00-03:00", targcompdate: "2026-11-03T00:00:00-03:00", estlabhrs: 3 }),
-    order("target-end-only", { targstartdate: "2026-11-09", targcompdate: "2026-11-06", estlabhrs: 4 }),
-    order("scheduled-start", { schedstart: "2026-11-04T12:00:00Z", estlabhrs: 5 }),
-    order("scheduled-end-only", { schedfinish: "2026-11-02", estlabhrs: 6 }),
-    order("crosses-entire-period", { schedstart: "2026-10-30", schedfinish: "2026-11-10", estlabhrs: 7 }),
-    order("outside", { targstartdate: "2026-11-07", targcompdate: "2026-11-08", schedstart: "2026-11-07", schedfinish: "2026-11-08", estlabhrs: 100 }),
-    order("no-dates", { estlabhrs: 200 }),
-    order("invalid-range", { targstartdate: "2026-11-05", targcompdate: "2026-11-01", schedstart: "2026-11-09", schedfinish: "2026-11-01" }),
-    order("closed", { targstartdate: "2026-11-03", estlabhrs: 500 }, "CLOSE"),
+    order("target-start", { worktype: "E", targstartdate: "2026-11-01T00:00:00-03:00", targcompdate: "2026-11-03T00:00:00-03:00", estlabhrs: 3 }),
+    order("target-end-only", { worktype: "E", targstartdate: "2026-11-09", targcompdate: "2026-11-06", estlabhrs: 4 }),
+    order("scheduled-start", { worktype: "E", schedstart: "2026-11-04T12:00:00Z", estlabhrs: 5 }, "WSCH"),
+    order("scheduled-end-only", { worktype: "E", schedfinish: "2026-11-02", estlabhrs: 6 }),
+    order("crosses-entire-period", { worktype: "E", schedstart: "2026-10-30", schedfinish: "2026-11-10", estlabhrs: 7 }, "WSCH"),
+    order("outside", { worktype: "E", targstartdate: "2026-11-07", targcompdate: "2026-11-08", schedstart: "2026-11-07", schedfinish: "2026-11-08", estlabhrs: 100 }, "WSCH"),
+    order("no-dates", { worktype: "E", estlabhrs: 200 }),
+    order("invalid-range", { worktype: "E", targstartdate: "2026-11-05", targcompdate: "2026-11-01", schedstart: "2026-11-09", schedfinish: "2026-11-01" }, "WSCH"),
+    order("closed", { worktype: "E", targstartdate: "2026-11-03", estlabhrs: 500 }, "CLOSE"),
   ];
   assert.deepEqual(rows.map(row => orderInPeriod(row, range.inicio, range.fim)),
     [true, true, true, true, true, false, false, true, true]);
@@ -97,7 +97,8 @@ test("period portfolio includes target or scheduled dates inside and intervals c
   assert.equal(data.sectorPending.length, 8);
   assert.equal(data.pending.length, 6);
   assert.equal(data.neededHours, 25);
-  assert.equal(data.pm.count + data.corrective.count, 0);
+  assert.equal(data.pm.count, 0);
+  assert.equal(data.corrective.count, 6);
   assert.equal(buildDashboard(rows, null, null, null).pending.length, 8);
   const noPeriod = buildDashboard(rows, null, null, null, null, true);
   assert.equal(noPeriod.pending.length, 0);
@@ -146,24 +147,26 @@ test("preventive PM table only accepts I/S orders whose description starts with 
   ]);
   assert.deepEqual(data.corrective.rows.map((row) => row.wonum), ["E-PM"]);
 });
-test("corrective backlog is not restricted by target or scheduled dates", () => {
+test("corrective orders use the same planning-window filter as PM", () => {
+  const range = { inicio: "2026-10-26", fim: "2026-10-30" };
   const data = buildDashboard([
-    order("E-no-date", { worktype: "E", estlabhrs: 2 }),
-    order("E-future", { worktype: "E", targstartdate: "2027-01-01", estlabhrs: 3 }),
-    order("PM-outside", { worktype: "S", description: "PM3 atividade", targstartdate: "2027-01-01", estlabhrs: 10 }),
-    order("E-closed", { worktype: "E", estlabhrs: 30 }, "CLOSE"),
-  ], null, null, null, { inicio: "2026-10-26", fim: "2026-10-30" }, true);
-  assert.deepEqual(data.corrective.rows.map(o => o.wonum), ["E-no-date", "E-future"]);
-  assert.equal(data.pm.count, 0);
-  assert.equal(data.neededHours, 5);
+    order("E-inside", { worktype: "E", sneconstraint: "2026-10-28T08:00:00-03:00", fnlconstraint: "2026-11-02T18:00:00-03:00", estlabhrs: 2 }),
+    order("E-outside", { worktype: "E", sneconstraint: "2027-01-01", fnlconstraint: "2027-01-02", estlabhrs: 3 }),
+    order("PM-inside", { worktype: "I", description: "PM1 preventiva", sneconstraint: "2026-10-25", fnlconstraint: "2026-10-29", estlabhrs: 4 }),
+    order("PM-outside", { worktype: "S", description: "PM3 atividade", sneconstraint: "2027-01-01", fnlconstraint: "2027-01-02", estlabhrs: 10 }),
+    order("E-closed", { worktype: "E", sneconstraint: "2026-10-28", estlabhrs: 30 }, "CLOSE"),
+  ], null, null, null, range, true);
+  assert.deepEqual(data.corrective.rows.map(o => o.wonum), ["E-inside"]);
+  assert.equal(data.pm.count, 1);
+  assert.equal(data.neededHours, 6);
   assert.equal(data.pending.length, 2);
 });
 test("daily load only uses scheduled starts, not targets; timezone is Brasilia", () => {
   assert.equal(localDate("2026-11-03T01:00:00Z"), "2026-11-02");
   const data = buildDashboard([
-    order("1", { schedstart: "2026-11-03T01:00:00Z", schedfinish: "2026-11-04T14:00:00Z", estlabhrs: 8 }),
-    order("2", { targstartdate: "2026-11-02T10:00:00-03:00", estlabhrs: 10 }),
-    order("3", { schedstart: "2026-11-03T10:00:00Z", schedfinish: "2026-11-01T10:00:00Z", estlabhrs: 2 }),
+    order("1", { worktype: "E", schedstart: "2026-11-03T01:00:00Z", schedfinish: "2026-11-04T14:00:00Z", estlabhrs: 8 }, "WSCH"),
+    order("2", { worktype: "E", targstartdate: "2026-11-02T10:00:00-03:00", estlabhrs: 10 }),
+    order("3", { worktype: "E", schedstart: "2026-11-03T10:00:00Z", schedfinish: "2026-11-01T10:00:00Z", estlabhrs: 2 }, "WSCH"),
   ], plan, labor, null);
   assert.equal(data.daily[0].demand, 8);
   assert.equal(data.gantt.length, 1);
@@ -182,4 +185,37 @@ test("official calendar exceptions cannot become zero capacity by default", () =
   shifted.executantes[0].ajustes_datas = { "2026-11-03": 6, "2026-11-05": 7 };
   assert.equal(buildDashboard([], shifted, labor, calendar).availableHours, 45);
   assert.equal(daysBetween("2026-12-31", "2027-01-01").length, 2);
+});
+test("preparation Pareto sums planned hours by named specialty and shows selected capacity", () => {
+  const range = { inicio: "2026-11-02", fim: "2026-11-06" };
+  const rows = [
+    order("PM-1", { worktype: "I", description: "PM1 preventiva", targstartdate: "2026-11-03", wplabor: [
+      { especialidade: "180", "horas normais": "1:30" },
+      { especialidade: "180", "horas normais": "0:30" },
+      { especialidade: "300", laborhrs: 2 },
+    ] }),
+    order("PM-2", { worktype: "S", description: "PM2 qualidade", targstartdate: "2026-11-03", wplabor: [{ craft: "180", laborhrs: 3 }] }),
+    order("E-1", { worktype: "E", targstartdate: "2026-11-03", wplabor: [
+      { especialidade: "180", "horas normais": "2,0" }, { especialidade: "240", laborhrs: 1 },
+    ] }),
+    order("PM-complete", { worktype: "I", description: "PM3 completa", targstartdate: "2026-11-03", wplabor: [{ craft: "300", quantity: "1" }] }),
+    order("closed", { worktype: "E", targstartdate: "2026-11-03", wplabor: [{ especialidade: "999" }] }, "CLOSE"),
+    order("not-pm", { worktype: "S", description: "Inspeção", targstartdate: "2026-11-03", wplabor: [{ especialidade: "888" }] }),
+  ];
+  const names = new Map([["180", "Mechanic"], ["240", "Electrician High Voltage"]]);
+  const capacity = new Map([["180", 12], ["300", 4], ["240", 8]]);
+  assert.deepEqual(preparationOrders(rows, range).map(row => row.wonum), ["PM-1", "PM-2", "E-1"]);
+  assert.deepEqual(specialtyPareto(rows, "pm", range, names, capacity, true), [
+    { label: "Mechanic", value: 5, availableHours: 12 }, { label: "300", value: 2, availableHours: 4 },
+  ]);
+  assert.deepEqual(specialtyPareto(rows, "corretiva", range, names, capacity, true), [
+    { label: "Mechanic", value: 2, availableHours: 12 }, { label: "Electrician High Voltage", value: 1, availableHours: 8 },
+  ]);
+  assert.deepEqual(specialtyPareto(rows, "all", range, names, capacity, true), [
+    { label: "Mechanic", value: 7, availableHours: 12 },
+    { label: "300", value: 2, availableHours: 4 },
+    { label: "Electrician High Voltage", value: 1, availableHours: 8 },
+  ]);
+  assert.deepEqual(specialtyPareto(rows, "all", range, names, new Map(), true)
+    .map(item => item.availableHours), [0, 0, 0]);
 });

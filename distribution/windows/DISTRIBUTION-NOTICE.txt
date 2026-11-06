@@ -1,0 +1,19 @@
+MICHELIN
+Planning & Scheduling
+Centro Operacional
+
+Uso interno sujeito a autorizacao da empresa e aos controles de TI.
+Este pacote nao concede acesso ao BMA ou SharePoint. Cada funcionario utiliza
+sua propria identidade corporativa e conclui login/MFA quando solicitado.
+Nao sao fornecidos senhas, tokens, cookies ou dados operacionais do desenvolvedor.
+O pacote inclui o cadastro de referencia funcionario.json usado pelos vinculos SharePoint/BMA.
+
+Python, Node.js, Firefox, GeckoDriver e bibliotecas de terceiros permanecem
+sujeitos as respectivas licencas, incluidas na pasta licenses do aplicativo
+e nos arquivos de licenca do navegador. As marcas pertencem aos seus titulares.
+
+Dados e perfil do usuario ficam em %LOCALAPPDATA%\Michelin\PlanningScheduling.
+Atualizar ou desinstalar o aplicativo nao exclui automaticamente esses dados.
+Utilize somente meios corporativos autorizados para backup ou transferencia.
+
+A empresa deve homologar a distribuicao, as licencas e a automacao BMA.

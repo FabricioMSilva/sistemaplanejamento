@@ -5,12 +5,22 @@ import {
 import { CalendarDays, ChartNoAxesCombined, Clock3 } from "lucide-react";
 import type { PcmData } from "@/utils/pcmDashboard";
 import { daysBetween, formatNumber } from "@/utils/pcmDashboard";
+import { useThemeColors } from "@/lib/useThemeColors";
 
-const colors = ["#f5c14a", "#38bdf8", "#34d399", "#a78bfa", "#fb923c", "#f472b6"];
-const tooltipStyle = { backgroundColor: "#10243b", border: "1px solid #30465f", borderRadius: 12, color: "#e2e8f0" };
-const axis = { fill: "#94a3b8", fontSize: 11 };
+function useChartStyle() {
+  const c = useThemeColors();
+  return {
+    colors: [c["chart-1"], c["chart-2"], c["chart-3"], c["chart-4"], c["chart-5"], c.accent],
+    tooltipStyle: { backgroundColor: c["surface-elevated"], border: `1px solid ${c.border}`, borderRadius: 12, color: c.foreground },
+    axis: { fill: c["muted-foreground"], fontSize: 11 },
+    grid: c.border,
+    capacity: c["chart-1"],
+    demand: c["chart-2"],
+  };
+}
 
 export function PcmCharts({ data }: { data: PcmData }) {
+  const { colors, tooltipStyle, axis, grid } = useChartStyle();
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="pcm-panel p-5">
@@ -44,11 +54,11 @@ export function PcmCharts({ data }: { data: PcmData }) {
           <div className="mt-4 h-64" role="img" aria-label="Horas estimadas por tipo de ordem de trabalho">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data.types} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
-                <CartesianGrid stroke="#ffffff0b" vertical={false} />
+                <CartesianGrid stroke={grid} vertical={false} />
                 <XAxis dataKey="name" tick={axis} axisLine={false} tickLine={false} />
                 <YAxis tick={axis} axisLine={false} tickLine={false} width={46} />
-                <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "#ffffff08" }} formatter={(value) => `${formatNumber(Number(value))} h`} />
-                <Bar dataKey="hours" name="HH estimado" fill="#38bdf8" radius={[5, 5, 0, 0]} maxBarSize={34} />
+                <Tooltip contentStyle={tooltipStyle} cursor={{ fill: grid, fillOpacity: 0.3 }} formatter={(value) => `${formatNumber(Number(value))} h`} />
+                <Bar dataKey="hours" name="HH estimado" fill={colors[0]} radius={[5, 5, 0, 0]} maxBarSize={34} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -64,6 +74,7 @@ function EmptyChart({ text }: { text: string }) {
 }
 
 export function PcmTemporal({ data, inicio, fim }: { data: PcmData; inicio: string; fim: string }) {
+  const { tooltipStyle, axis, grid, capacity, demand } = useChartStyle();
   const [view, setView] = useState<"calendar" | "gantt">("calendar");
   const [offset, setOffset] = useState(0);
   const total = data.daily.length;
@@ -139,13 +150,13 @@ export function PcmTemporal({ data, inicio, fim }: { data: PcmData; inicio: stri
           <div className="mt-6 h-52" role="img" aria-label="Carga de trabalho diária e capacidade">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={days} margin={{ left: 0, right: 5 }}>
-                <CartesianGrid stroke="#ffffff0a" vertical={false} />
+                <CartesianGrid stroke={grid} vertical={false} />
                 <XAxis dataKey="label" tick={axis} axisLine={false} tickLine={false} interval="preserveStartEnd" />
                 <YAxis tick={axis} axisLine={false} tickLine={false} width={40} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(value) => `${formatNumber(Number(value))} h`} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="capacity" name="Capacidade base" fill="#38bdf8" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="demand" name="HH de OTs com início no dia" fill="#f5c14a" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="capacity" name="Capacidade base" fill={capacity} radius={[3, 3, 0, 0]} />
+                <Bar dataKey="demand" name="HH de OTs com início no dia" fill={demand} radius={[3, 3, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

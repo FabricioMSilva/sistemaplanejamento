@@ -11,7 +11,7 @@ from models.database import get_connection, listar_mao_de_obra, listar_ordens_tr
 from services.labor_planning import PlanejamentoEquipe, calcular_equipe
 from services.pcm_capacity import week_start, weekly_totals
 
-TERMINAL = {"CAN", "CLOSE", "COMP", "HISTEDIT"}
+TERMINAL = {"CAN", "CANCELADA", "CLOSE", "COMP", "HISTEDIT"}
 
 
 class Input(BaseModel):
@@ -25,6 +25,7 @@ class Requirement(Input):
     funcao: str = Field(default="", max_length=100)
     todas_especialidades: bool = False
     selecionada: bool = False
+    na_nuvem: bool = False
     prioridade: int = Field(default=3, ge=1, le=5)
     liberada: bool = False
     observacao: str = Field(default="", max_length=1000)
@@ -51,6 +52,13 @@ class Placement(Input):
     dia: date
 
 
+class Overtime(Input):
+    ot: str = Field(min_length=1, max_length=100)
+    executante: str = Field(min_length=1, max_length=100)
+    dia: date
+    horas: float = Field(gt=0, le=1000, allow_inf_nan=False)
+
+
 class PlanChange(Input):
     revisao: int = Field(ge=1)
     requisitos: dict[str, Requirement]
@@ -60,6 +68,16 @@ class PlanChange(Input):
     confirmar: bool = False
     atualizar_especialidades: bool = False
     posicionamentos: list[Placement] = Field(default_factory=list, max_length=20000)
+    horas_extras: list[Overtime] = Field(default_factory=list, max_length=20000)
+
+
+class AddOrders(Input):
+    revisao: int = Field(ge=1)
+    ordens: list[str] = Field(min_length=1, max_length=500)
+
+
+class RefreshPlanOrders(Input):
+    revisao: int = Field(ge=1)
 
 
 class PlanTeamChange(Input):
@@ -89,16 +107,6 @@ class ConflictError(ValueError):
     pass
 
 
-def specialty_matches(person: dict, requirement: dict) -> bool:
-    return requirement.get("todas_especialidades", False) or (
-        person["orgid"] == requirement["orgid"] and person["funcao"] == requirement["funcao"]
-    )
-
-
-def specialty_selected(requirement: dict) -> bool:
-    return requirement.get("todas_especialidades", False) or bool(requirement["orgid"] and requirement["funcao"])
-
-
 def text(order: dict, key: str) -> str:
     value = order.get("dados", {}).get(key, order.get(key))
     if isinstance(value, dict):
@@ -124,13 +132,9 @@ def day_value(value: str) -> str | None:
         return None
 
 
-def in_period(order: dict, start: str, end: str) -> bool:
-    values = [day_value(text(order, key)) for key in
-              ("targstartdate", "targcompdate", "schedstart", "schedfinish")]
-    return any(value and start <= value <= end for value in values) or any(
-        a and b and a <= b and a <= end and b >= start
-        for a, b in ((values[0], values[1]), (values[2], values[3]))
-    )
+def pm_constraint_before_end(order: dict, end: str) -> bool:
+    not_before = day_value(text(order, "sneconstraint"))
+    return bool(not_before and not_before < end)
 
 
 def mode_for(order: dict) -> str | None:
@@ -160,7 +164,7 @@ def corrective_available(order: dict) -> bool:
 def eligible(sectors: list[str], start: str, end: str) -> list[dict]:
     return [order for order in listar_ordens_trabalho(sectors)
             if order["status"].upper() not in TERMINAL and
-            (corrective_available(order) or (mode_for(order) == "pm" and in_period(order, start, end)
+            (corrective_available(order) or (mode_for(order) == "pm" and pm_constraint_before_end(order, end)
                                                  and not has_existing_planning_info(order)))]
 
 
@@ -298,7 +302,7 @@ def create_plan(sectors: list[str]) -> dict:
                                       if c["codigo"] == m.funcao),
              "dias": sorted(str(day) for day in m.dias_disponiveis)}
             for m in team.executantes],
-        "ordens": orders, "requisitos": requirements, "blocos": [], "indisponibilidades": [],
+        "ordens": orders, "requisitos": requirements, "blocos": [], "indisponibilidades": [], "horas_extras": [],
     }
     encoded = json.dumps(doc, ensure_ascii=False)
     pdf = schedule_pdf(doc)
@@ -311,6 +315,404 @@ def create_plan(sectors: list[str]) -> dict:
                      (doc["id"], scope, 1, "rascunho", now, encoded))
         conn.execute("INSERT INTO pcm_revisoes VALUES (?,?,?,?,?,?)", (doc["id"], 1, now, doc["motivo"], encoded, pdf))
     return doc
+
+
+def add_orders_to_plan(plan_id: str, request: AddOrders) -> dict:
+    current = get_plan(plan_id)
+    if current["revisao"] != request.revisao:
+        raise ConflictError("O plano foi alterado. Recarregue antes de adicionar OTs.")
+    if current["status"] != "rascunho":
+        raise ValueError("Adicione OTs somente a um rascunho.")
+
+    selected_keys = set(request.ordens)
+    if len(selected_keys) != len(request.ordens):
+        raise ValueError("A seleção contém OTs duplicadas.")
+    candidates = {
+        order_key(order): order
+        for order in listar_ordens_trabalho(current["setores"])
+        if str(order.get("status") or "").strip().upper() in {"WSCH", "PREPARED", "WFSCH"}
+        and mode_for(order) == "pm"
+    }
+    if not selected_keys.issubset(candidates):
+        raise ValueError("Uma ou mais OTs não estão mais no banco com status WSCH, PREPARED ou WFSCH.")
+
+    doc = copy.deepcopy(current)
+    existing = {order_key(order): index for index, order in enumerate(doc["ordens"])}
+    for key in request.ordens:
+        if candidates[key]["status"].strip().upper() == "WFSCH" and not (
+            key in existing and doc["requisitos"][key].get("na_nuvem")
+        ):
+            raise ValueError("OT com status WFSCH só pode voltar se estiver na nuvem deste planejamento.")
+    added = 0
+    members = PlanejamentoEquipe.model_validate(doc["equipe"]).executantes
+    for key in request.ordens:
+        if key in existing:
+            requirement = doc["requisitos"][key]
+            if not requirement.get("na_nuvem"):
+                continue
+            doc["requisitos"][key] = {**requirement, "na_nuvem": False, "selecionada": False}
+            added += 1
+            continue
+
+        order = candidates[key]
+        try:
+            duration = float(text(order, "estdur"))
+        except ValueError:
+            duration = 0
+        doc["ordens"].append({**order, "planejamento_adicionado": True})
+        doc["requisitos"][key] = Requirement(
+            duracao=duration if 0 < duration <= 1000 else None,
+            **labor_requirement(order, members),
+        ).model_dump()
+        added += 1
+
+    if not added:
+        raise ValueError("As OTs selecionadas já estão disponíveis neste cronograma.")
+    validate_plan(doc)
+    doc.update(
+        revisao=current["revisao"] + 1,
+        atualizado_em=datetime.now(timezone.utc).isoformat(),
+        motivo="OTs adicionadas da carteira do banco de dados",
+    )
+    encoded = json.dumps(doc, ensure_ascii=False)
+    pdf = schedule_pdf(doc)
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT revisao,status FROM pcm_planos WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise LookupError("Planejamento nao encontrado.")
+        if row["revisao"] != request.revisao or row["status"] != "rascunho":
+            raise ConflictError("O plano foi alterado. Recarregue antes de adicionar OTs.")
+        updated = conn.execute(
+            "UPDATE pcm_planos SET revisao=?,atualizado_em=?,dados_json=? WHERE id=? AND revisao=?",
+            (doc["revisao"], doc["atualizado_em"], encoded, plan_id, request.revisao),
+        )
+        if updated.rowcount != 1:
+            raise ConflictError("O plano foi alterado. Recarregue antes de adicionar OTs.")
+        conn.execute(
+            "INSERT INTO pcm_revisoes VALUES (?,?,?,?,?,?)",
+            (plan_id, doc["revisao"], doc["atualizado_em"], doc["motivo"], encoded, pdf),
+        )
+    return doc
+
+
+def refresh_plan_orders(plan_id: str, request: RefreshPlanOrders) -> dict:
+    current = get_plan(plan_id)
+    if current["revisao"] != request.revisao:
+        raise ConflictError("O plano foi alterado. Recarregue antes de atualizar os dados das OTs.")
+    latest = {order_key(order): order for order in listar_ordens_trabalho(current["setores"])}
+    doc = copy.deepcopy(current)
+    updated = 0
+    for index, order in enumerate(doc["ordens"]):
+        fresh = latest.get(order_key(order))
+        if fresh is None:
+            continue
+        doc["ordens"][index] = {**order, **fresh}
+        updated += 1
+    if not updated:
+        return {"plano": current, "atualizadas": 0}
+
+    validate_plan(doc)
+    doc.update(
+        revisao=current["revisao"] + 1,
+        atualizado_em=datetime.now(timezone.utc).isoformat(),
+        motivo="Dados das OTs atualizados do banco após consulta BMA",
+    )
+    encoded = json.dumps(doc, ensure_ascii=False)
+    pdf = schedule_pdf(doc)
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT revisao,status FROM pcm_planos WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise LookupError("Planejamento nao encontrado.")
+        if row["revisao"] != request.revisao:
+            raise ConflictError("O plano foi alterado. Recarregue antes de atualizar os dados das OTs.")
+        updated_row = conn.execute(
+            "UPDATE pcm_planos SET revisao=?,atualizado_em=?,dados_json=? WHERE id=? AND revisao=?",
+            (doc["revisao"], doc["atualizado_em"], encoded, plan_id, request.revisao),
+        )
+        if updated_row.rowcount != 1:
+            raise ConflictError("O plano foi alterado. Recarregue antes de atualizar os dados das OTs.")
+        conn.execute(
+            "INSERT INTO pcm_revisoes VALUES (?,?,?,?,?,?)",
+            (plan_id, doc["revisao"], doc["atualizado_em"], doc["motivo"], encoded, pdf),
+        )
+    return {"plano": doc, "atualizadas": updated}
+
+
+def import_bma_schedule(plan_id: str, results: list[dict]) -> dict:
+    current = get_plan(plan_id)
+    if current["status"] != "rascunho":
+        raise ValueError("Importe o planejamento do BMA em um rascunho, sem substituir um plano confirmado.")
+
+    doc = copy.deepcopy(current)
+    available_orders = {order_key(order): order for order in listar_ordens_trabalho(doc["setores"])}
+    for result in results:
+        fresh = result.get("ordem_bma")
+        if not isinstance(fresh, dict):
+            continue
+        fresh_order = {"dados": fresh}
+        fresh_order.update({
+            "siteid": text(fresh_order, "siteid") or str(result.get("siteid", "")),
+            "wonum": text(fresh_order, "wonum") or str(result.get("numero_ot", "")),
+            "status": text(fresh_order, "status"),
+            "maintenanceshop": text(fresh_order, "maintenanceshop").upper(),
+            "lead": text(fresh_order, "lead"),
+            "schedstart": text(fresh_order, "schedstart"),
+        })
+        if fresh_order["siteid"] and fresh_order["wonum"]:
+            available_orders[order_key(fresh_order)] = fresh_order
+    orders_by_number: dict[str, list[dict]] = {}
+    for order in available_orders.values():
+        orders_by_number.setdefault(order["wonum"].upper(), []).append(order)
+    labor = listar_mao_de_obra(doc["setores"], filtrar_nf=False)["profissionais"]
+    labor_by_code: dict[str, list[dict]] = {}
+    for person in labor:
+        labor_by_code.setdefault(person["matricula"].upper(), []).append(person)
+
+    plan_people = {person["id"]: person for person in doc["pessoas"]}
+    team_members = {f'{member["orgid"]}:{member["matricula"]}': member
+                    for member in doc["equipe"]["executantes"]}
+    existing_numbers = {order["wonum"].upper() for order in doc["ordens"]}
+    locally_allocated = {block["ot"] for block in doc["blocos"]}
+    unavailable = {(item["executante"], str(item["dia"])) for item in doc["indisponibilidades"]}
+    grouped: dict[tuple[str, str, float, float], set[str]] = {}
+    order_groups: dict[str, set[tuple[str, str, float, float]]] = {}
+    order_people: dict[str, dict[str, dict]] = {}
+    imported_orders = set()
+    updated_orders = set()
+    warnings: list[str] = []
+
+    def parse_assignment_start(raw_start: str):
+        for pattern in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %I:%M %p"):
+            try:
+                return datetime.strptime(raw_start, pattern)
+            except ValueError:
+                continue
+        return None
+
+    for result in results:
+        number = str(result.get("numero_ot", "")).strip().upper()
+        matching_orders = orders_by_number.get(number, [])
+        siteid = str(result.get("siteid", "")).strip().upper()
+        order = next((candidate for candidate in matching_orders
+                      if siteid and candidate["siteid"].upper() == siteid), None)
+        if order is None and len(matching_orders) == 1:
+            order = matching_orders[0]
+        if order is None:
+            warnings.append(f"{number or 'OT sem número'}: não encontrada na carteira local.")
+            continue
+        key = order_key(order)
+        status = str(result.get("status") or text(order, "status")).strip().upper()
+        if status in TERMINAL:
+            warnings.append(f"{number}: status {status}; não será incluída no cronograma nem na carteira.")
+            continue
+        if number in existing_numbers and key in locally_allocated:
+            warnings.append(f"{number}: mantida como estava; já possui blocos locais.")
+            continue
+        existing_index = next(
+            (index for index, current_order in enumerate(doc["ordens"])
+             if order_key(current_order) == key),
+            None,
+        )
+        if existing_index is None:
+            imported_order = {**order, "planejamento_bma_importado": True}
+            doc["ordens"].append(imported_order)
+            updated_orders.add(order["wonum"])
+            try:
+                duration = float(text(order, "estdur"))
+            except ValueError:
+                duration = 0
+            doc["requisitos"][key] = Requirement(
+                duracao=duration if 0 < duration <= 1000 else None,
+                **labor_requirement(order, PlanejamentoEquipe.model_validate(doc["equipe"]).executantes),
+            ).model_dump()
+        else:
+            doc["ordens"][existing_index] = {
+                **doc["ordens"][existing_index], **order, "planejamento_bma_importado": True,
+            }
+            updated_orders.add(order["wonum"])
+        existing_numbers.add(order["wonum"].upper())
+        assignments = result.get("dados_adicionais", {}).get("atribuicoes", [])
+        unavailable_assignment = None
+        for assignment in assignments:
+            planned_start = parse_assignment_start(str(assignment.get("inicio", "")).strip())
+            if not planned_start:
+                continue
+            day = planned_start.date().isoformat()
+            if not doc["inicio"] <= day <= doc["fim"]:
+                continue
+            laborcode = str(assignment.get("laborcode", "")).strip().upper()
+            matches = labor_by_code.get(laborcode, [])
+            person = next((candidate for candidate in matches
+                           if f'{candidate["orgid"]}:{candidate["matricula"]}' in plan_people), None)
+            if person is None and len(matches) == 1:
+                person = matches[0]
+            if person:
+                person_id = f'{person["orgid"]}:{person["matricula"]}'
+                if (person_id, day) in unavailable:
+                    unavailable_assignment = (
+                        f"{number}: {person['nome']} indisponível localmente em {day}; "
+                        "OT mantida na carteira sem importar blocos para remanejamento."
+                    )
+                    break
+        if unavailable_assignment:
+            warnings.append(unavailable_assignment)
+            continue
+
+        parsed: list[tuple[str, str, float, float, dict]] = []
+        invalid = None
+        for assignment in assignments:
+            raw_start = str(assignment.get("inicio", "")).strip()
+            planned_start = parse_assignment_start(raw_start)
+            if not planned_start:
+                continue
+            day = planned_start.date().isoformat()
+            if not doc["inicio"] <= day <= doc["fim"]:
+                continue
+            raw_hours = str(assignment.get("horas", "")).strip().replace(",", ".")
+            try:
+                hours = (int(raw_hours.split(":", 1)[0]) + int(raw_hours.split(":", 1)[1]) / 60
+                         if ":" in raw_hours else float(raw_hours))
+            except ValueError:
+                invalid = f"{number}: horas inválidas na atribuição de {assignment.get('laborcode', 'matrícula desconhecida')}."
+                break
+            laborcode = str(assignment.get("laborcode", "")).strip().upper()
+            matches = labor_by_code.get(laborcode, [])
+            person = next((candidate for candidate in matches
+                           if f'{candidate["orgid"]}:{candidate["matricula"]}' in plan_people), None)
+            if person is None and len(matches) == 1:
+                person = matches[0]
+            if not person:
+                invalid = f"{number}: matrícula {laborcode or 'vazia'} não identificada na mão de obra local."
+                break
+            person_id = f'{person["orgid"]}:{person["matricula"]}'
+            if person_id not in plan_people:
+                crafts = person.get("especialidades", [])
+                craft = next((item for item in crafts if item.get("principal")), None) or next(iter(crafts), None)
+                if not craft or not craft.get("codigo"):
+                    invalid = f"{number}: {laborcode} não possui especialidade no cadastro local."
+                    break
+                order_people.setdefault(key, {})[person_id] = {
+                    "id": person_id, "nome": person["nome"], "orgid": person["orgid"],
+                    "matricula": person["matricula"], "funcao": craft["codigo"],
+                    "funcao_descricao": craft.get("descricao") or craft["codigo"], "dias": [],
+                }
+                team_members.setdefault(person_id, {
+                    "orgid": person["orgid"], "matricula": person["matricula"],
+                    "funcao": craft["codigo"], "jornada": "adm", "equipe": None,
+                    "ajustes_datas": {}, "inicio_ciclo": None, "ajuste_horas": 0,
+                    "ausencias": [], "capacidade": "dias_8h", "dias_disponiveis": [],
+                })
+            group_key = (key, day, planned_start.hour + planned_start.minute / 60, hours)
+            grouped.setdefault(group_key, set()).add(person_id)
+            order_groups.setdefault(key, set()).add(group_key)
+            person_data = order_people.get(key, {}).get(person_id) or plan_people.get(person_id)
+            if person_data is not None and day not in person_data["dias"]:
+                person_data["dias"].append(day)
+            team_member = team_members[person_id]
+            if team_member["capacidade"] in ("dias_6h", "dias_8h"):
+                team_member["dias_disponiveis"] = sorted(set(team_member.get("dias_disponiveis") or []) | {day})
+            elif team_member["capacidade"] == "escala":
+                previous_days = (plan_people.get(person_id) or {}).get("dias", [])
+                team_member["capacidade"] = "dias_8h"
+                team_member["dias_disponiveis"] = sorted(set(previous_days) | {day})
+                team_member["ajustes_datas"] = {}
+                team_member["ausencias"] = []
+                team_member["inicio_ciclo"] = None
+                team_member["ajuste_horas"] = 0
+            parsed.append((key, day, group_key[2], hours, person))
+
+        if invalid:
+            warnings.append(invalid)
+            for group_key in order_groups.pop(key, set()):
+                grouped.pop(group_key, None)
+            order_people.pop(key, None)
+            continue
+        if not parsed:
+            warnings.append(
+                f"{number}: sem executantes atribuídos; mantida pendente de planejamento e disponível para alocação local."
+            )
+
+    for people in order_people.values():
+        for person_id, person in people.items():
+            if person_id not in plan_people:
+                doc["pessoas"].append(person)
+                plan_people[person_id] = person
+    doc["equipe"]["executantes"] = list(team_members.values())
+    blocks = list(doc["blocos"])
+    for key, group_keys in order_groups.items():
+        order = available_orders[key]
+        if order["wonum"].upper() in existing_numbers and key in locally_allocated:
+            continue
+        sizes = {len(grouped[group_key]) for group_key in group_keys}
+        if len(sizes) != 1 or not sizes or 0 in sizes:
+            warnings.append(f"{order['wonum']}: quantidade de executantes varia entre atribuições; OT não importada.")
+            continue
+        existing_index = next(
+            (index for index, current_order in enumerate(doc["ordens"])
+             if order_key(current_order) == key),
+            None,
+        )
+        if existing_index is None:
+            doc["ordens"].append(order)
+        else:
+            doc["ordens"][existing_index] = {**doc["ordens"][existing_index], **order}
+        existing_numbers.add(order["wonum"].upper())
+        imported_blocks = []
+        for group_key in sorted(group_keys, key=lambda item: (item[1], item[2])):
+            _, day, start, hours = group_key
+            imported_blocks.append({
+                "id": str(uuid4()), "ot": key, "dia": day, "inicio": start,
+                "horas": hours, "executantes": sorted(grouped[group_key]),
+            })
+        total_hours = sum(block["horas"] for block in imported_blocks)
+        doc["requisitos"][key] = Requirement(
+            duracao=total_hours, pessoas=next(iter(sizes)), todas_especialidades=True,
+            liberada=True,
+        ).model_dump()
+        candidate = copy.deepcopy(doc)
+        candidate["blocos"] = [*blocks, *imported_blocks]
+        try:
+            validate_plan(candidate)
+        except ValueError as exc:
+            warnings.append(
+                f"{order['wonum']}: {exc} OT mantida na carteira como pendente de planejamento."
+            )
+            continue
+        blocks.extend(imported_blocks)
+        imported_orders.add(order["wonum"])
+
+    saved = current
+    if updated_orders or imported_orders:
+        doc.update(
+            revisao=current["revisao"] + 1,
+            atualizado_em=datetime.now(timezone.utc).isoformat(),
+            motivo="Importação do planejamento do BMA",
+        )
+        doc["blocos"] = blocks
+        validate_plan(doc)
+        encoded = json.dumps(doc, ensure_ascii=False)
+        pdf = schedule_pdf(doc)
+        with get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT revisao FROM pcm_planos WHERE id=?", (plan_id,)).fetchone()
+            if row is None:
+                raise LookupError("Planejamento nao encontrado.")
+            if row["revisao"] != current["revisao"]:
+                raise ConflictError("O plano foi alterado. Recarregue antes de importar o BMA.")
+            updated = conn.execute(
+                "UPDATE pcm_planos SET revisao=?,atualizado_em=?,dados_json=? WHERE id=? AND revisao=?",
+                (doc["revisao"], doc["atualizado_em"], encoded, plan_id, current["revisao"]),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("O plano foi alterado. Recarregue antes de importar o BMA.")
+            conn.execute(
+                "INSERT INTO pcm_revisoes VALUES (?,?,?,?,?,?)",
+                (plan_id, doc["revisao"], doc["atualizado_em"], doc["motivo"], encoded, pdf),
+            )
+        saved = doc
+    return {"plano": saved, "importadas": sorted(imported_orders), "avisos": warnings}
 
 
 def prepare_change(current: dict, change: PlanChange) -> dict:
@@ -331,22 +733,37 @@ def prepare_change(current: dict, change: PlanChange) -> dict:
 
 def labor_requirement(order: dict, members) -> dict:
     rows = order.get("dados", {}).get("wplabor", [])
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+    if not isinstance(rows, list):
         return {}
-    row = rows[0]
-    def value(key):
+    def value(row, key):
         raw = row.get(key)
-        return raw.get("value", raw.get("_value")) if isinstance(raw, dict) else raw
-    craft = str(value("craft") or "").strip()
-    org = str(value("orgid") or "").strip()
-    matching = {m.orgid for m in members if m.funcao == craft and (not org or m.orgid == org)}
+        return raw.get("value", raw.get("_value", raw.get("description"))) if isinstance(raw, dict) else raw
+
+    labor_rows = [row for row in rows if isinstance(row, dict)]
+    if not labor_rows:
+        return {}
+    crafts = {str(value(row, key) or "").strip() for row in labor_rows
+              for key in ("craft", "especialidade") if value(row, key)}
+    orgs = {str(value(row, "orgid") or "").strip() for row in labor_rows if value(row, "orgid")}
     result = {}
-    if craft and (org or len(matching) == 1):
-        result.update(funcao=craft, orgid=org or next(iter(matching)))
-    try:
-        quantity = float(value("quantity"))
-    except (TypeError, ValueError):
-        quantity = 0
+    if len(crafts) == 1:
+        craft = next(iter(crafts))
+        matching = {m.orgid for m in members if m.funcao == craft and (not orgs or m.orgid in orgs)}
+        if len(orgs) == 1 or len(matching) == 1:
+            result.update(funcao=craft, orgid=next(iter(orgs)) if orgs else next(iter(matching)))
+    quantities = []
+    for row in labor_rows:
+        raw_quantity = value(row, "quantity") or value(row, "quantidade")
+        try:
+            quantity = float(raw_quantity)
+        except (TypeError, ValueError):
+            quantities = []
+            break
+        if not 1 <= quantity <= 100 or not quantity.is_integer():
+            quantities = []
+            break
+        quantities.append(quantity)
+    quantity = sum(quantities)
     if 1 <= quantity <= 100 and quantity.is_integer():
         result["pessoas"] = int(quantity)
     return result
@@ -402,6 +819,7 @@ def validate_plan(doc: dict, confirming: bool = False) -> None:
         unavailable.add(key)
     duration: dict[str, float] = {}
     order_weeks: dict[str, str] = {}
+    block_hours: dict[tuple[str, str, str], float] = {}
     ids = set()
     for block in doc["blocos"]:
         ot, day = block["ot"], block["dia"]
@@ -413,26 +831,37 @@ def validate_plan(doc: dict, confirming: bool = False) -> None:
         if ot in order_weeks and order_weeks[ot] != week:
             raise ValueError(f"{orders[ot]['wonum']}: a continuacao da atividade deve permanecer na mesma semana.")
         order_weeks[ot] = week
-        if not req["duracao"] or not req["pessoas"] or not specialty_selected(req):
-            raise ValueError(f"{orders[ot]['wonum']}: informe duracao, pessoas e especialidade.")
+        if not req["duracao"] or not req["pessoas"]:
+            raise ValueError(f"{orders[ot]['wonum']}: informe duracao e quantidade de pessoas.")
         if not doc["inicio"] <= day <= doc["fim"]:
             raise ValueError("Bloco fora do horizonte.")
         earliest = day_value(text(orders[ot], "sneconstraint"))
-        latest = day_value(text(orders[ot], "fnlconstraint"))
-        if (earliest and day < earliest) or (latest and day > latest):
-            raise ValueError(f"{orders[ot]['wonum']}: bloco viola a data de restricao do BMA.")
+        if earliest and day < earliest:
+            raise ValueError(f"{orders[ot]['wonum']}: bloco antecede a data de inicio permitida no BMA.")
         members = block["executantes"]
         if len(members) != req["pessoas"] or len(set(members)) != len(members):
             raise ValueError("O bloco deve ter a quantidade simultanea de executantes requerida.")
         for member in members:
             person = people.get(member)
-            if not person or not specialty_matches(person, req):
-                raise ValueError("Executante fora da equipe ou sem a especialidade selecionada.")
+            if not person:
+                raise ValueError("Executante fora da equipe.")
             if day not in person["dias"] or (member, day) in unavailable:
                 raise ValueError(f"{person['nome']}: indisponivel em {day}.")
+            block_key = (ot, member, day)
+            block_hours[block_key] = block_hours.get(block_key, 0) + block["horas"]
         duration[ot] = duration.get(ot, 0) + block["horas"]
         if duration[ot] > req["duracao"] + 1e-6:
             raise ValueError(f"{orders[ot]['wonum']}: duracao alocada acima da atividade.")
+    overtime_keys = set()
+    for extra in doc.get("horas_extras", []):
+        ot, member, day = extra["ot"], extra["executante"], extra["dia"]
+        key = (ot, member, day)
+        person = people.get(member)
+        if (key in overtime_keys or ot not in orders or not person or not doc["inicio"] <= day <= doc["fim"]
+                or day not in person["dias"] or (member, day) in unavailable
+                or extra["horas"] > block_hours.get(key, 0) + 1e-6):
+            raise ValueError("Hora extra invalida: confira OT, executante, data e horas do bloco.")
+        overtime_keys.add(key)
     if confirming:
         for (person, week), total in weekly_totals([doc]).items():
             if total["horas"] > total["capacidade"] + 1e-6:
@@ -493,14 +922,18 @@ def suggest(current: dict, request: Suggestion) -> dict:
     doc = prepare_change(current, request.alteracoes)
     validate_plan(doc)
     unavailable = {(a["executante"], a["dia"]) for a in doc["indisponibilidades"]}
-    # Preserve every manual/PM allocation; suggestions only fill currently free slots.
     candidates = [o for o in doc["ordens"] if mode_for(o) == request.modo]
     if request.ordens is not None:
-        if any(key not in doc["requisitos"] for key in request.ordens):
+        selected = set(request.ordens)
+        if any(key not in doc["requisitos"] for key in selected):
             raise ValueError("Selecao de OTs fora da carteira.")
-        candidates = [o for o in candidates if order_key(o) in set(request.ordens)]
-    candidates.sort(key=lambda o: (doc["requisitos"][order_key(o)]["prioridade"],
-                                   day_value(text(o, "targstartdate")) or "9999", o["wonum"]))
+        candidates = [o for o in candidates if order_key(o) in selected]
+    candidates.sort(key=lambda o: (
+        day_value(text(o, "fnlconstraint")) or "9999",
+        doc["requisitos"][order_key(o)]["prioridade"],
+        day_value(text(o, "targstartdate")) or "9999",
+        o["wonum"],
+    ))
     messages = []
     day = date.fromisoformat(doc["inicio"])
     days = []
@@ -510,36 +943,64 @@ def suggest(current: dict, request: Suggestion) -> dict:
     for order in candidates:
         key = order_key(order)
         req = doc["requisitos"][key]
-        if not all((req["duracao"], req["pessoas"], specialty_selected(req))):
+        if not req["duracao"] or not req["pessoas"]:
             messages.append(f"{order['wonum']}: preparacao incompleta.")
             continue
         remaining = round(req["duracao"] - sum(b["horas"] for b in doc["blocos"] if b["ot"] == key), 6)
-        activity_week = week_start(next((b["dia"] for b in doc["blocos"] if b["ot"] == key), doc["inicio"]))
-        for day in days:
-            if week_start(day) != activity_week:
-                continue
-            earliest = day_value(text(order, "sneconstraint"))
-            latest = day_value(text(order, "fnlconstraint"))
-            if (earliest and day < earliest) or (latest and day > latest):
-                continue
+        if remaining <= 1e-6:
+            continue
+        earliest = day_value(text(order, "sneconstraint"))
+        latest = day_value(text(order, "fnlconstraint"))
+        execution_days = [candidate_day for candidate_day in days
+                          if (not earliest or candidate_day >= earliest)
+                          and (not latest or candidate_day <= latest)]
+        if not execution_days:
+            messages.append(f"{order['wonum']}: a janela de execucao nao cruza o periodo do planejamento.")
+            continue
+        target = day_value(text(order, "targstartdate")) or day_value(text(order, "schedstart"))
+        existing_days = [block["dia"] for block in doc["blocos"] if block["ot"] == key]
+        if existing_days:
+            activity_week = week_start(existing_days[0])
+        else:
+            preferred_day = min(execution_days, key=lambda value: (
+                abs((date.fromisoformat(value) - date.fromisoformat(target)).days) if target else 0,
+                value,
+            ))
+            activity_week = week_start(preferred_day)
+        execution_days = [candidate_day for candidate_day in execution_days
+                          if week_start(candidate_day) == activity_week]
+        total_person_capacity = {}
+        for person in doc["pessoas"]:
+            total_person_capacity[person["id"]] = max(8, 8 * sum(
+                doc["inicio"] <= available_day <= doc["fim"]
+                and (person["id"], available_day) not in unavailable
+                for available_day in person["dias"]
+            ))
+        for day in sorted(execution_days, key=lambda value: (
+            abs((date.fromisoformat(value) - date.fromisoformat(target)).days) if target else 0,
+            value,
+        )):
             if remaining <= 1e-6:
                 break
             totals = weekly_totals([doc])
             free = []
             for person in doc["pessoas"]:
-                if not specialty_matches(person, req) or day not in person["dias"] or (person["id"], day) in unavailable:
+                if day not in person["dias"] or (person["id"], day) in unavailable:
                     continue
                 total = totals[(person["id"], week_start(day))]
                 load = sum(b["horas"] for b in doc["blocos"] if b["dia"] == day and person["id"] in b["executantes"])
                 room = min(8 - load, total["capacidade"] - total["horas"])
                 if room > 1e-6:
-                    free.append((person["id"], room))
+                    assigned = sum(b["horas"] for b in doc["blocos"] if person["id"] in b["executantes"])
+                    utilization = assigned / total_person_capacity[person["id"]]
+                    free.append((person["id"], room, utilization, total["horas"], load))
             if len(free) < req["pessoas"]:
                 continue
+            free.sort(key=lambda candidate: (candidate[2], candidate[3], candidate[4], candidate[0]))
             crew = free[:req["pessoas"]]
-            hours = round(min(remaining, *(room for _, room in crew)), 6)
+            hours = round(min(remaining, *(candidate[1] for candidate in crew)), 6)
             doc["blocos"].append({"id": str(uuid4()), "ot": key, "dia": day,
-                                  "inicio": 0, "horas": hours, "executantes": [p for p, _ in crew]})
+                                  "inicio": 0, "horas": hours, "executantes": [candidate[0] for candidate in crew]})
             remaining = round(remaining - hours, 6)
         if remaining > 1e-6:
             messages.append(f"{order['wonum']}: faltam {remaining:g} h de duracao por falta de capacidade compativel.")
@@ -631,3 +1092,32 @@ def get_pdf(plan_id: str, revision: int) -> bytes:
             from services.pcm_pdf import render_schedule
             return render_schedule(doc)
     return bytes(row["pdf"])
+
+
+def get_person_pdf(plan_id: str, revision: int, executante: str) -> bytes:
+    doc = get_plan(plan_id, revision)
+    person = next((item for item in doc["pessoas"] if item["id"] == executante), None)
+    if person is None:
+        raise LookupError("Executante nao encontrado nesta revisao.")
+    blocks = [
+        {**block, "executantes": [executante]}
+        for block in doc["blocos"] if executante in block["executantes"]
+    ]
+    if not blocks:
+        raise ValueError("Este executante nao possui atividades na revisao.")
+    order_keys = {block["ot"] for block in blocks}
+    individual = copy.deepcopy(doc)
+    individual["pessoas"] = [person]
+    individual["ordens"] = [order for order in doc["ordens"] if order_key(order) in order_keys]
+    individual["requisitos"] = {key: value for key, value in doc["requisitos"].items() if key in order_keys}
+    individual["blocos"] = blocks
+    individual["indisponibilidades"] = [item for item in doc["indisponibilidades"] if item["executante"] == executante]
+    individual["posicionamentos"] = [item for item in doc.get("posicionamentos", []) if item["executante"] == executante]
+    individual["horas_extras"] = [item for item in doc.get("horas_extras", []) if item["executante"] == executante]
+    team = individual.get("equipe", {})
+    team["executantes"] = [
+        member for member in team.get("executantes", [])
+        if f'{member["orgid"]}:{member["matricula"]}' == executante
+    ]
+    individual["motivo"] = f"PDF individual · {person['nome']}"
+    return schedule_pdf(individual)

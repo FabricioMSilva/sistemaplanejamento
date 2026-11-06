@@ -11,6 +11,7 @@ def weekly_totals(documents: list[dict]) -> dict:
     available = defaultdict(set)
     absent = set()
     loads = defaultdict(float)
+    overtime = defaultdict(float)
     for doc in documents:
         absent.update((a["executante"], a["dia"]) for a in doc["indisponibilidades"])
         for person in doc["pessoas"]:
@@ -20,9 +21,11 @@ def weekly_totals(documents: list[dict]) -> dict:
         for block in doc["blocos"]:
             for person in block["executantes"]:
                 loads[(person, week_start(block["dia"]))] += block["horas"]
+        for extra in doc.get("horas_extras", []):
+            overtime[(extra["executante"], week_start(extra["dia"]))] += extra["horas"]
     keys = available.keys() | loads.keys()
     return {key: {
-        "capacidade": 8 * sum((key[0], day) not in absent for day in available[key]),
+        "capacidade": 8 * sum((key[0], day) not in absent for day in available[key]) + overtime[key],
         "horas": loads[key],
     } for key in keys}
 

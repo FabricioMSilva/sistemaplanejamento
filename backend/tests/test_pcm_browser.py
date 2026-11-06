@@ -111,7 +111,7 @@ class PcmBrowserTests(unittest.TestCase):
     def prepare(self, number, duration):
         self.browser.find_element(By.CSS_SELECTOR, f"button[aria-label='Editar OT {number}']").click()
         self.fill("Duração total", duration)
-        craft = self.browser.find_element(By.XPATH, "//label[contains(normalize-space(.),'Especialidade exigida')]/select")
+        craft = self.browser.find_element(By.XPATH, "//label[contains(normalize-space(.),'Especialidade (informação)')]/select")
         Select(craft).select_by_value('["BR","210"]')
         for checkbox in self.browser.find_elements(By.CSS_SELECTOR, "#activity-editor input[aria-label^='Executante ']"):
             if not checkbox.is_selected():
@@ -202,7 +202,7 @@ class PcmBrowserTests(unittest.TestCase):
         self.assertFalse(self.browser.find_elements(By.CSS_SELECTOR, f"[data-drag-ot='RES:{self.pm}']"))
         self.browser.find_element(By.CSS_SELECTOR, f"[data-placement-ot='RES:{self.pm}'] button[draggable]").click()
         self.fill("Duração total", 4)
-        Select(self.browser.find_element(By.XPATH, "//label[contains(normalize-space(.),'Especialidade exigida')]/select")).select_by_value('["BR","210"]')
+        Select(self.browser.find_element(By.XPATH, "//label[contains(normalize-space(.),'Especialidade (informação)')]/select")).select_by_value('["BR","210"]')
         for checkbox in self.browser.find_elements(By.CSS_SELECTOR, "#activity-editor input[aria-label^='Executante ']"):
             if not checkbox.is_selected():
                 checkbox.click()
@@ -388,7 +388,7 @@ class PcmBrowserTests(unittest.TestCase):
                         "Motivo / descrição desta revisão", "Histórico e cronogramas PDF"):
             self.assertNotIn(removed, self.browser.find_element(By.TAG_NAME, "body").text)
         self.prepare(self.pm, 10)
-        craft = self.browser.find_element(By.XPATH, "//label[contains(normalize-space(.),'Especialidade exigida')]/select")
+        craft = self.browser.find_element(By.XPATH, "//label[contains(normalize-space(.),'Especialidade (informação)')]/select")
         Select(craft).select_by_value("todos")
         for checkbox in self.browser.find_elements(By.CSS_SELECTOR, "#activity-editor input[aria-label^='Executante ']"):
             if not checkbox.is_selected():

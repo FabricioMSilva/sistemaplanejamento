@@ -1,84 +1,101 @@
 import Head from "next/head";
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { ArrowRight, ListChecks, LoaderCircle, Plus, RefreshCw } from "lucide-react";
+import AssetImage from "@/components/ui/AssetImage";
+import { APP_BRAND, BRAND_ASSETS } from "@/config/brand-assets";
+import { listWorkPlans, type PlanSummary } from "@/services/pcm";
+import { formatPlanningDate } from "@/utils/laborPlanning";
 
 export default function HomePage() {
+  const [plans, setPlans] = useState<PlanSummary[]>([]);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [plansError, setPlansError] = useState("");
+  const [reloadPlans, setReloadPlans] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPlansLoading(true);
+    setPlansError("");
+    listWorkPlans().then((items) => {
+      if (!cancelled) setPlans(items);
+    }).catch((reason: unknown) => {
+      if (!cancelled) setPlansError(reason instanceof Error ? reason.message : "Falha ao carregar planejamentos.");
+    }).finally(() => {
+      if (!cancelled) setPlansLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [reloadPlans]);
+
   return (
     <>
       <Head>
-        <title>BMA Intranet | Central de operações</title>
-        <meta name="description" content="Acesse os fluxos de ordens de trabalho e planejamento." />
+        <title>{`Início | ${APP_BRAND.name}`}</title>
+        <meta name="description" content={`${APP_BRAND.name} · ${APP_BRAND.subtitle}`} />
       </Head>
-      <main className="relative flex min-h-screen flex-col overflow-hidden px-5 py-6 sm:px-8 lg:px-12">
-        <div className="pointer-events-none absolute -right-40 -top-48 h-[34rem] w-[34rem] rounded-full border border-white/5" />
-        <div className="pointer-events-none absolute -right-20 -top-28 h-[25rem] w-[25rem] rounded-full border border-white/5" />
-        <header className="relative z-10 mx-auto flex w-full max-w-7xl items-center justify-between border-b border-white/10 pb-5">
-          <div className="flex items-center gap-3">
-            <img src="/logo.svg?v=robomario" alt="Logo RoboMario" className="h-11 w-11" />
-            <div>
-              <p className="text-xs font-medium uppercase tracking-[0.18em] text-accent-400">BMA Intranet</p>
-              <p className="mt-0.5 text-sm text-slate-300">RoboMario · Operações</p>
-            </div>
-          </div>
-          <span className="hidden items-center gap-2 rounded-full border border-white/10 px-3 py-1.5 text-xs text-slate-300 sm:inline-flex">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-            Área de trabalho
-          </span>
-        </header>
-
-        <section className="relative z-10 mx-auto flex w-full max-w-7xl flex-1 flex-col justify-center py-14">
-          <div className="mb-10 max-w-2xl">
-            <p className="mb-3 text-sm font-medium uppercase tracking-[0.16em] text-slate-400">Central de operações</p>
-            <h1 className="text-3xl font-semibold leading-tight text-white sm:text-4xl">O que vamos organizar hoje?</h1>
-            <p className="mt-3 max-w-xl text-base leading-7 text-slate-400">
-              Escolha um fluxo para começar. Você pode abrir uma ordem de trabalho ou estruturar um novo planejamento.
+      <main className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-6xl flex-col px-5 py-10 sm:px-8 lg:py-16">
+        <section className="mb-10 flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="max-w-3xl">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-primary">{APP_BRAND.subtitle} · {APP_BRAND.context}</p>
+            <h1 className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl">Planejamentos de manutenção</h1>
+            <p className="mt-3 max-w-xl text-base leading-7 text-muted-foreground">
+              Consulte os rascunhos e cronogramas salvos para continuar o trabalho.
             </p>
           </div>
-
-          <div className="grid gap-4 md:grid-cols-2">
-            <Link
-              href="/ot"
-              className="group flex min-h-64 flex-col justify-between rounded-xl border border-accent-400/30 bg-navy-900/80 p-6 transition hover:border-accent-400/70 hover:bg-navy-800/90 focus:outline-none focus:ring-2 focus:ring-accent-400 sm:p-8"
-            >
-              <div className="flex items-start justify-between">
-                <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-accent-400/10 text-sm font-bold text-accent-400">OT</span>
-                <span className="text-xl text-slate-500 transition group-hover:translate-x-1 group-hover:text-accent-400" aria-hidden="true">→</span>
-              </div>
-              <div className="mt-10">
-                <h2 className="text-2xl font-semibold text-white">Criar OT</h2>
-                <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
-                  Processe uma planilha de anomalias, revise os registros e gere ordens de trabalho.
-                </p>
-                <span className="mt-5 inline-flex text-sm font-medium text-accent-400">Abrir fluxo de OT</span>
-              </div>
-            </Link>
-
-            <Link
-              href="/planejamento"
-              className="group flex min-h-64 flex-col justify-between rounded-xl border border-sky-300/25 bg-navy-900/80 p-6 transition hover:border-sky-300/60 hover:bg-navy-800/90 focus:outline-none focus:ring-2 focus:ring-sky-300 sm:p-8"
-            >
-              <div className="flex items-start justify-between">
-                <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-sky-300/10 text-lg text-sky-300" aria-hidden="true">▦</span>
-                <span className="text-xl text-slate-500 transition group-hover:translate-x-1 group-hover:text-sky-300" aria-hidden="true">→</span>
-              </div>
-              <div className="mt-10">
-                <h2 className="text-2xl font-semibold text-white">Criar planejamento</h2>
-                <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
-                  Defina objetivo, área responsável e período para organizar uma nova atividade.
-                </p>
-                <span className="mt-5 inline-flex text-sm font-medium text-sky-300">Iniciar planejamento</span>
-              </div>
-            </Link>
+          <AssetImage asset={BRAND_ASSETS.planningLogo} height={245} priority className="max-w-full" />
+        </section>
+        <section aria-labelledby="programmed-plans-heading">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 id="programmed-plans-heading" className="text-xl font-semibold text-foreground">Já programado</h2>
+              <p className="mt-1 text-sm text-muted-foreground">Rascunhos e cronogramas salvos para continuar.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <Link href="/planejamento/acompanhamento" className="inline-flex items-center gap-2 text-sm font-medium text-primary hover:underline">
+                <ListChecks size={16} aria-hidden="true" /> Ver todos <ArrowRight size={15} aria-hidden="true" />
+              </Link>
+              <button type="button" className="rounded-lg border border-border p-2 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                aria-label="Atualizar planejamentos" title="Atualizar planejamentos" disabled={plansLoading}
+                onClick={() => setReloadPlans((current) => current + 1)}>
+                {plansLoading ? <LoaderCircle size={17} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={17} aria-hidden="true" />}
+              </button>
+            </div>
           </div>
-          <Link
-            href="/planejamento/acompanhamento"
-            className="mt-5 inline-flex w-fit items-center gap-3 rounded-lg border border-emerald-400/25 bg-emerald-400/5 px-5 py-3 text-sm font-medium text-emerald-300 transition hover:bg-emerald-400/10 focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          >
-            Acompanhar planejamentos · cronogramas e revisões <span aria-hidden="true">→</span>
-          </Link>
+
+          {plansError && <p role="alert" className="mb-3 flex flex-wrap items-center gap-3 text-sm text-destructive">
+            {plansError}
+            <button type="button" className="underline" onClick={() => setReloadPlans((current) => current + 1)}>Tentar novamente</button>
+          </p>}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <Link href="/planejamento" className="group flex min-h-44 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-primary/50 bg-primary/5 p-6 text-center transition hover:border-primary hover:bg-primary/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground"><Plus size={24} aria-hidden="true" /></span>
+              <span className="text-base font-semibold text-foreground">Criar planejamento</span>
+              <span className="text-sm text-muted-foreground">Iniciar uma nova programação de manutenção</span>
+            </Link>
+
+            {plansLoading && <div role="status" className="flex min-h-44 items-center justify-center gap-3 rounded-xl border border-border bg-card p-6 text-sm text-muted-foreground">
+              <LoaderCircle size={19} className="animate-spin text-primary" aria-hidden="true" /> Carregando planejamentos...
+            </div>}
+            {!plansLoading && plans.slice(0, 5).map((plan) => (
+              <Link key={plan.id} href={{ pathname: "/planejamento", query: { etapa: "3", plano: plan.id } }}
+                className="flex min-h-44 flex-col justify-between rounded-xl border border-border bg-card p-5 shadow-card transition hover:border-primary/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <div className="flex items-start justify-between gap-3">
+                  <span className="text-xs font-semibold uppercase text-muted-foreground">{plan.status === "confirmado" ? "Confirmado" : "Rascunho"}</span>
+                  <span className="text-xs text-muted-foreground">r{plan.revisao}</span>
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-card-foreground">{formatPlanningDate(plan.inicio)} – {formatPlanningDate(plan.fim)}</h3>
+                  <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{plan.setores.join(" · ")}</p>
+                </div>
+                <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary">Abrir cronograma <ArrowRight size={15} aria-hidden="true" /></span>
+              </Link>
+            ))}
+            {!plansLoading && !plansError && plans.length === 0 && <p className="flex min-h-44 items-center rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">Nenhum planejamento salvo ainda.</p>}
+          </div>
         </section>
 
-        <footer className="relative z-10 mx-auto w-full max-w-7xl border-t border-white/10 pt-4 text-xs text-slate-500">
-          RoboMario · Intranet BMA
+        <footer className="mt-auto border-t border-border pt-4 text-xs text-muted-foreground">
+          {APP_BRAND.name} · {APP_BRAND.subtitle}
         </footer>
       </main>
     </>

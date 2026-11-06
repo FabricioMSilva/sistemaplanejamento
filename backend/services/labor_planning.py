@@ -6,6 +6,7 @@ from math import isfinite
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+from utils.runtime_paths import resource_root
 
 
 class ExecutantePlanejado(BaseModel):
@@ -39,7 +40,7 @@ class ExecutantePlanejado(BaseModel):
 
 @lru_cache(maxsize=1)
 def calendario_turnos() -> dict:
-    path = Path(__file__).resolve().parents[2] / "database" / "catalogos" / "turnos-2026.json"
+    path = resource_root() / "database" / "catalogos" / "turnos-2026.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 

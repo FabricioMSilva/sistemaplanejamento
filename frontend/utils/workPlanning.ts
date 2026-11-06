@@ -1,17 +1,16 @@
-import type { Allocation, PlanPerson, Requirement, WorkPlan } from "@/services/pcm";
+import type { Allocation, BmaPreparationRequirement, PlanPerson, WorkPlan } from "@/services/pcm";
 import { orderKey } from "@/services/pcm";
 import { cellText, getWorkType } from "@/utils/orderFilters";
 import { numericField, localDate } from "@/utils/pcmDashboard";
 import { plannedLabor } from "@/utils/plannedLabor";
 
 export const activityMode = (order: WorkPlan["ordens"][number]) => getWorkType(order) === "E" ? "corretiva" : "pm";
+export const isGalleryBmaStatus = (status: string) => ["PREPARED", "WSCH", "WFSCH"].includes(status.trim().toUpperCase());
 export function activityCategory(order: WorkPlan["ordens"][number]): string {
   if (activityMode(order) === "corretiva") return "corretiva";
   const level = cellText(order, "description").trim().toUpperCase().match(/^PM\s*([123])\b/)?.[1];
   return level ? `pm${level}` : "outras-pm";
 }
-export const specialtyMatches = (person: PlanPerson, requirement: Requirement) =>
-  requirement.todas_especialidades === true || (person.orgid === requirement.orgid && person.funcao === requirement.funcao);
 export const allocatedDuration = (plan: WorkPlan, key: string) =>
   plan.blocos.filter((b) => b.ot === key).reduce((sum, b) => sum + b.horas, 0);
 export function prepareDraggedOrder(plan: WorkPlan, key: string): WorkPlan {
@@ -36,9 +35,7 @@ export function pendingActivity(plan: WorkPlan, key: string): boolean {
 }
 export function activityPlanningComplete(plan: WorkPlan, key: string): boolean {
   const requirement = plan.requisitos[key];
-  if (!requirement?.duracao || !requirement.pessoas
-    || (!requirement.todas_especialidades && (!requirement.funcao || !requirement.orgid))
-    || pendingActivity(plan, key)) return false;
+  if (!requirement?.duracao || !requirement.pessoas || pendingActivity(plan, key)) return false;
   const blocks = plan.blocos.filter((block) => block.ot === key);
   return blocks.length > 0 && blocks.every((block) => block.executantes.length === requirement.pessoas);
 }
@@ -67,25 +64,38 @@ export const availableDay = (plan: WorkPlan, person: string, day: string) =>
   && !plan.indisponibilidades.some((a) => a.executante === person && a.dia === day);
 
 export function proposedDays(order: WorkPlan["ordens"][number], days: string[]): string[] {
-  return days.filter((day) => [["targstartdate", "targcompdate"], ["schedstart", "schedfinish"]].some(([a, b]) => {
-    const start = localDate(cellText(order, a)), end = localDate(cellText(order, b));
-    return start && end && start <= end ? start <= day && day <= end : day === start || day === end;
-  }));
+  const earliest = localDate(cellText(order, "sneconstraint"));
+  const latest = localDate(cellText(order, "fnlconstraint"));
+  return days.filter((day) => (!earliest || day >= earliest) && (!latest || day <= latest));
 }
 
 export function isTargetDay(order: WorkPlan["ordens"][number], day: string): boolean {
-  const start = localDate(cellText(order, "targstartdate"));
-  const end = localDate(cellText(order, "targcompdate"));
-  return start && end && start <= end ? start <= day && day <= end : day === start || day === end;
+  const target = localDate(cellText(order, "targstartdate")) || localDate(cellText(order, "schedstart"));
+  return target === day;
 }
 
 export function activityDateConstraintError(order: WorkPlan["ordens"][number], day: string): string | null {
   const earliest = localDate(cellText(order, "sneconstraint"));
-  const latest = localDate(cellText(order, "fnlconstraint"));
   const format = (value: string) => value.split("-").reverse().join("/");
   if (earliest && day < earliest) return `${order.wonum}: não iniciar antes de ${format(earliest)}.`;
-  if (latest && day > latest) return `${order.wonum}: não terminar depois de ${format(latest)}.`;
   return null;
+}
+
+export function activityDateWarning(order: WorkPlan["ordens"][number], day: string): string | null {
+  const earliest = localDate(cellText(order, "sneconstraint"));
+  const latest = localDate(cellText(order, "fnlconstraint"));
+  const format = (value: string) => value.split("-").reverse().join("/");
+  if (earliest && day < earliest) return `${order.wonum}: início anterior ao permitido em ${format(earliest)}.`;
+  if (latest && day > latest) return `${order.wonum}: prazo de ${format(latest)} ultrapassado; atividade programada com atraso.`;
+  return null;
+}
+
+export type ActivityDateStatus = "target" | "window" | "outside" | "late";
+export function activityDateStatus(order: WorkPlan["ordens"][number], day: string): ActivityDateStatus {
+  const latest = localDate(cellText(order, "fnlconstraint"));
+  if (latest && day > latest) return "late";
+  if (activityDateConstraintError(order, day)) return "outside";
+  return isTargetDay(order, day) ? "target" : "window";
 }
 
 export function scheduleSelectedDays(plan: WorkPlan, key: string, dates: string[], members: string[]): Allocation[] {
@@ -104,7 +114,7 @@ export function scheduleSelectedDays(plan: WorkPlan, key: string, dates: string[
   if (dateError) throw new Error(dateError);
   if (crew.some((id) => {
     const person = plan.pessoas.find((p) => p.id === id);
-    return !person || !specialtyMatches(person, req) || days.some((d) => !availableDay(plan, id, d));
+    return !person || days.some((d) => !availableDay(plan, id, d));
   })) throw new Error("Há executante incompatível ou indisponível em um dos dias marcados.");
   const blocks = [...plan.blocos];
   let remaining = req.duracao - allocatedDuration(plan, key);
@@ -158,15 +168,13 @@ export function resequenceWeek(
   const cursors = new Map<string, string>();
   for (const current of queue) {
     const req = plan.requisitos[current.ot], order = plan.ordens.find((o) => orderKey(o) === current.ot);
-    if (!req || !order || current.crew.some((id) => {
-      const person = plan.pessoas.find((p) => p.id === id);
-      return !person || !specialtyMatches(person, req);
-    })) throw new Error("Equipe incompatível com a especialidade da OT.");
-    const earliest = localDate(cellText(order, "sneconstraint")), latest = localDate(cellText(order, "fnlconstraint"));
+    if (!req || !order || current.crew.some((id) => !plan.pessoas.some((person) => person.id === id)))
+      throw new Error("Executante fora da equipe.");
+    const earliest = localDate(cellText(order, "sneconstraint"));
     const start = [plan.inicio, week, earliest ?? "", current.ot === job.ot ? targetDay : "",
       ...current.crew.map((p) => cursors.get(p) ?? "")].sort().pop()!;
     const dates = [...new Set(plan.pessoas.flatMap((p) => p.dias))].sort().filter((d) =>
-      d >= start && d <= plan.fim && weekStart(d) === week && (!latest || d <= latest)
+      d >= start && d <= plan.fim && weekStart(d) === week
       && current.crew.every((p) => availableDay(plan, p, d)));
     let remaining = current.hours;
     for (const day of dates) {
@@ -192,11 +200,84 @@ export function weekStart(day: string): string {
 
 export function weeklyBalance(plan: WorkPlan, person: string, day: string) {
   const week = weekStart(day);
-  const capacity = (plan.pessoas.find((p) => p.id === person)?.dias ?? []).filter((d) =>
+  const normalCapacity = (plan.pessoas.find((p) => p.id === person)?.dias ?? []).filter((d) =>
     d >= plan.inicio && d <= plan.fim && weekStart(d) === week && availableDay(plan, person, d)).length * 8;
+  const overtime = (plan.horas_extras ?? []).filter((extra) => extra.executante === person && weekStart(extra.dia) === week)
+    .reduce((sum, extra) => sum + extra.horas, 0);
   const load = plan.blocos.filter((b) => b.executantes.includes(person) && weekStart(b.dia) === week)
     .reduce((sum, b) => sum + b.horas, 0);
+  const capacity = normalCapacity + overtime;
   return { capacity, load, remaining: capacity - load };
+}
+
+export type LaborHelperCandidate = { person: PlanPerson; hours: number; overtimeMinimum: number };
+
+export function laborHelperCandidates(
+  plan: WorkPlan, key: string, requirements: BmaPreparationRequirement[] = [],
+): LaborHelperCandidate[] {
+  const blocks = plan.blocos.filter((block) => block.ot === key);
+  const req = plan.requisitos[key];
+  if (!blocks.length || !req) return [];
+  const currentCrew = new Set(blocks.flatMap((block) => block.executantes));
+  const requiredCount = requirements.reduce((sum, row) => sum + Math.max(0, Number(row.quantidade) || 0), 0);
+  const missingCount = Math.max(0, (requiredCount || req.pessoas || 0) - currentCrew.size);
+  if (!missingCount) return [];
+  const hoursByDay = new Map<string, number>();
+  for (const block of blocks) hoursByDay.set(block.dia, (hoursByDay.get(block.dia) ?? 0) + block.horas);
+  const dates = [...hoursByDay.keys()].sort();
+  const totalHours = [...hoursByDay.values()].reduce((sum, hours) => sum + hours, 0);
+  return plan.pessoas.filter((person) => !currentCrew.has(person.id)
+    && dates.every((day) => availableDay(plan, person.id, day)))
+    .map((person) => {
+      const addedByWeek = new Map<string, number>();
+      for (const [day, hours] of hoursByDay) {
+        const week = weekStart(day);
+        addedByWeek.set(week, (addedByWeek.get(week) ?? 0) + hours);
+      }
+      const overtimeMinimum = [...addedByWeek].reduce((sum, [week, hours]) => {
+        const day = dates.find((value) => weekStart(value) === week)!;
+        return sum + Math.max(0, hours - weeklyBalance(plan, person.id, day).remaining);
+      }, 0);
+      return { person, hours: totalHours, overtimeMinimum };
+    }).filter((candidate) => candidate.overtimeMinimum <= candidate.hours + 1e-6);
+}
+
+export function addLaborHelper(
+  plan: WorkPlan, key: string, personId: string, overtimeHours = 0, requirements: BmaPreparationRequirement[] = [],
+): WorkPlan {
+  const candidate = laborHelperCandidates(plan, key, requirements).find((item) => item.person.id === personId);
+  const blocks = plan.blocos.filter((block) => block.ot === key);
+  const req = plan.requisitos[key];
+  if (!candidate || !req || !blocks.length) throw new Error("Executante indisponível ou incompatível com a OT.");
+  if (overtimeHours < candidate.overtimeMinimum - 1e-6 || overtimeHours > candidate.hours + 1e-6)
+    throw new Error("Informe hora extra suficiente para cobrir o excesso semanal, sem exceder as horas da OT.");
+  const crewSize = Math.max(...blocks.map((block) => block.executantes.length)) + 1;
+  const newBlocks = plan.blocos.map((block) => block.ot === key
+    ? { ...block, executantes: [...block.executantes, personId] } : block);
+  const hoursByDay = new Map<string, number>();
+  for (const block of blocks) hoursByDay.set(block.dia, (hoursByDay.get(block.dia) ?? 0) + block.horas);
+  let remainingOvertime = overtimeHours;
+  const extraRecords = [...(plan.horas_extras ?? [])].filter((extra) => !(extra.ot === key && extra.executante === personId));
+  for (const [day, hours] of [...hoursByDay].sort(([left], [right]) => left.localeCompare(right))) {
+    const grant = Math.min(hours, remainingOvertime);
+    if (grant > 1e-6) extraRecords.push({ ot: key, executante: personId, dia: day, horas: grant });
+    remainingOvertime -= grant;
+  }
+  if (remainingOvertime > 1e-6) throw new Error("As horas extras excedem as horas programadas para esta OT.");
+  return {
+    ...plan, blocos: newBlocks, horas_extras: extraRecords,
+    requisitos: { ...plan.requisitos, [key]: { ...req, pessoas: crewSize } },
+  };
+}
+
+export function returnOrderToPortfolio(plan: WorkPlan, key: string): WorkPlan {
+  return {
+    ...plan,
+    blocos: plan.blocos.filter((block) => block.ot !== key),
+    posicionamentos: (plan.posicionamentos ?? []).filter((placement) => placement.ot !== key),
+    horas_extras: (plan.horas_extras ?? []).filter((extra) => extra.ot !== key),
+    requisitos: { ...plan.requisitos, [key]: { ...plan.requisitos[key], selecionada: false } },
+  };
 }
 
 export function conflictingBlocks(plan: WorkPlan): Set<string> {
@@ -211,7 +292,9 @@ export function conflictingBlocks(plan: WorkPlan): Set<string> {
 
 export function planningMetrics(plan: WorkPlan) {
   const modes = new Map(plan.ordens.map((o) => [orderKey(o), activityMode(o)]));
-  const capacity = plan.pessoas.reduce((sum, p) => sum + p.dias.filter((day) => availableDay(plan, p.id, day)).length * 8, 0);
+  const normalCapacity = plan.pessoas.reduce((sum, p) => sum + p.dias.filter((day) => availableDay(plan, p.id, day)).length * 8, 0);
+  const overtime = (plan.horas_extras ?? []).reduce((sum, extra) => sum + extra.horas, 0);
+  const capacity = normalCapacity + overtime;
   const pm = plan.blocos.filter((b) => modes.get(b.ot) === "pm").reduce((sum, b) => sum + b.horas * b.executantes.length, 0);
   const corrective = plan.blocos.filter((b) => modes.get(b.ot) === "corretiva").reduce((sum, b) => sum + b.horas * b.executantes.length, 0);
   return { capacity, pm, corrective, remaining: capacity - pm - corrective };
@@ -238,6 +321,10 @@ export function specialtyWorkload(plan: WorkPlan) {
   for (const person of plan.pessoas) {
     const group = groupFor(person.orgid, person.funcao, person.funcao_descricao);
     group.capacidade += person.dias.filter((day) => availableDay(plan, person.id, day)).length * 8;
+  }
+  for (const extra of plan.horas_extras ?? []) {
+    const person = people.get(extra.executante);
+    if (person) groupFor(person.orgid, person.funcao, person.funcao_descricao).capacidade += extra.horas;
   }
   for (const block of plan.blocos) {
     for (const personId of block.executantes) {
@@ -276,8 +363,7 @@ export function dropActivity(
   plan: WorkPlan, key: string, day: string, personId: string, blockId?: string, sourcePerson?: string,
 ): Allocation[] {
   const req = plan.requisitos[key];
-  if (!req?.duracao || !req.pessoas || (!req.todas_especialidades && (!req.funcao || !req.orgid)))
-    throw new Error("Prepare a OT: duração, pessoas e especialidade.");
+  if (!req?.duracao || !req.pessoas) throw new Error("Prepare a OT: duração e quantidade de pessoas.");
   const order = plan.ordens.find((o) => orderKey(o) === key);
   if (day < plan.inicio || day > plan.fim) throw new Error("Dia fora do horizonte do planejamento.");
   const dateError = order && activityDateConstraintError(order, day);
@@ -287,7 +373,7 @@ export function dropActivity(
   const snapshot = { ...plan, blocos: blocks };
   if (blocks.some((b) => b.ot === key && weekStart(b.dia) !== weekStart(day)))
     throw new Error("A continuação da atividade deve permanecer na mesma semana. Retire/replaneje a OT completa para mudar de semana.");
-  const eligible = plan.pessoas.filter((p) => specialtyMatches(p, req) && availableDay(snapshot, p.id, day))
+  const eligible = plan.pessoas.filter((p) => availableDay(snapshot, p.id, day))
     .sort((a, b) => dayLoad(snapshot, a.id, day) - dayLoad(snapshot, b.id, day)).map((p) => p.id);
   const crew = previous
     ? [...new Set(previous.executantes.map((p) => p === sourcePerson ? personId : p))]
@@ -303,7 +389,10 @@ export function dropActivity(
     horas: Math.round(hours * 1e6) / 1e6, executantes: crew }];
 }
 
-export function distributeBatch(plan: WorkPlan, keys: string[], personId: string, fromDay = plan.inicio, exactDay = false) {
+export function distributeBatch(
+  plan: WorkPlan, keys: string[], personId: string, fromDay = plan.inicio,
+  exactDay = false, crewSelection?: string[],
+) {
   const target = plan.pessoas.find((p) => p.id === personId);
   if (!target) throw new Error("Executante fora da equipe.");
   let blocks = [...plan.blocos];
@@ -311,25 +400,24 @@ export function distributeBatch(plan: WorkPlan, keys: string[], personId: string
   for (const key of [...new Set(keys)]) {
     const req = plan.requisitos[key];
     const order = plan.ordens.find((o) => orderKey(o) === key);
-    if (!order || !req?.duracao || !req.pessoas
-      || (!req.todas_especialidades && (!req.funcao || !req.orgid))) {
+    if (!order || !req?.duracao || !req.pessoas) {
       const missing = [
         !req?.duracao && "duração",
         !req?.pessoas && "quantidade de pessoas",
-        !req?.todas_especialidades && (!req?.funcao || !req?.orgid) && "especialidade",
       ].filter(Boolean).join(", ");
       messages.push(`${order?.wonum ?? key}: informe ${missing} na preparação para alocar.`);
       continue;
     }
-    if (!specialtyMatches(target, req)) {
-      messages.push(`${order.wonum}: executante incompatível com a especialidade exigida.`);
+    const earliest = localDate(cellText(order, "sneconstraint"));
+    const activityWeek = weekStart(blocks.find((b) => b.ot === key)?.dia ?? fromDay);
+    const chosenCrew = crewSelection ? [...new Set(crewSelection)] : undefined;
+    if (chosenCrew && (chosenCrew.length !== req.pessoas || !chosenCrew.includes(personId))) {
+      messages.push(`${order.wonum}: selecione exatamente ${req.pessoas} executantes, incluindo o destino do arraste.`);
       continue;
     }
-    const earliest = localDate(cellText(order, "sneconstraint"));
-    const latest = localDate(cellText(order, "fnlconstraint"));
-    const activityWeek = weekStart(blocks.find((b) => b.ot === key)?.dia ?? fromDay);
     const days = [...target.dias].sort().filter((d) => weekStart(d) === activityWeek && d >= fromDay && d >= plan.inicio && d <= plan.fim
-      && (!earliest || d >= earliest) && (!latest || d <= latest) && availableDay(plan, personId, d));
+      && (!earliest || d >= earliest)
+      && (chosenCrew ? chosenCrew.every((member) => availableDay(plan, member, d)) : availableDay(plan, personId, d)));
     let remaining = Math.max(0, req.duracao - allocatedDuration({ ...plan, blocos: blocks }, key));
     if (exactDay && keys.length === 1 && remaining > 1e-6) {
       if (!days.includes(fromDay)) {
@@ -339,9 +427,9 @@ export function distributeBatch(plan: WorkPlan, keys: string[], personId: string
       }
       const snapshot = { ...plan, blocos: blocks };
       const room = (p: string) => Math.min(weeklyBalance(snapshot, p, fromDay).remaining, 8 - dayLoad(snapshot, p, fromDay));
-      const others = plan.pessoas.filter((p) => p.id !== personId && specialtyMatches(p, req) && availableDay(plan, p.id, fromDay))
+      const others = plan.pessoas.filter((p) => p.id !== personId && availableDay(plan, p.id, fromDay))
         .sort((a, b) => room(b.id) - room(a.id));
-      const crew = [personId, ...others.map((p) => p.id)].slice(0, req.pessoas);
+      const crew: string[] = chosenCrew ?? [personId, ...others.map((p) => p.id)].slice(0, req.pessoas);
       const hours = crew.length === req.pessoas ? Math.round(Math.min(remaining, 8, ...crew.map(room)) * 1e6) / 1e6 : 0;
       if (hours <= 1e-6) {
         messages.push(`${order.wonum}: sem equipe compatível ou espaço diário/semanal para o quadrado escolhido. Nenhum outro dia foi usado.`);
@@ -357,9 +445,9 @@ export function distributeBatch(plan: WorkPlan, keys: string[], personId: string
         const snapshot = { ...plan, blocos: blocks };
         const room = (p: string) => Math.max(0, Math.min(weeklyBalance(snapshot, p, day).remaining,
           flexible ? remaining : 8 - dayLoad(snapshot, p, day)));
-        const others = plan.pessoas.filter((p) => p.id !== personId && specialtyMatches(p, req) && availableDay(plan, p.id, day))
+        const others = chosenCrew ? [] : plan.pessoas.filter((p) => p.id !== personId && availableDay(plan, p.id, day))
           .sort((a, b) => room(b.id) - room(a.id));
-        const crew = [personId, ...others.map((p) => p.id)].slice(0, req.pessoas);
+        const crew: string[] = chosenCrew ?? [personId, ...others.map((p) => p.id)].slice(0, req.pessoas);
         if (crew.length !== req.pessoas) continue;
         const hours = Math.round(Math.min(remaining, ...crew.map(room)) * 1e6) / 1e6;
         if (hours <= 1e-6) continue;

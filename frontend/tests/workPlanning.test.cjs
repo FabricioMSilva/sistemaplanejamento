@@ -18,8 +18,9 @@ function load(relative) {
   }, m, m.exports);
   return m.exports;
 }
-const { dropActivity, activityDateConstraintError, isTargetDay, planningMetrics, dayLoad, provisionalDayLoad, displayedDayLoad, specialtyWorkload, distributeBatch, prepareDraggedOrder, activityPlanningComplete, readyForAutoConfirmation, conflictingBlocks, allocatedDuration, weeklyBalance, pendingActivity, scheduleSelectedDays, proposedDays, activityCategory, resequenceWeek } = load("utils/workPlanning");
+const { dropActivity, activityDateConstraintError, activityDateWarning, activityDateStatus, isGalleryBmaStatus, isTargetDay, planningMetrics, dayLoad, provisionalDayLoad, displayedDayLoad, specialtyWorkload, distributeBatch, prepareDraggedOrder, activityPlanningComplete, readyForAutoConfirmation, conflictingBlocks, allocatedDuration, weeklyBalance, pendingActivity, scheduleSelectedDays, proposedDays, activityCategory, resequenceWeek, laborHelperCandidates, addLaborHelper, returnOrderToPortfolio } = load("utils/workPlanning");
 const { matchesOrderSpecialty, missingPlanningData, plannedLabor, plannedBmaOrders } = load("utils/plannedLabor");
+const { preparationRequirements, underAllocatedPreparationOrders } = load("utils/plannedLabor");
 function fixture() {
   return {
     inicio: "2026-10-26", fim: "2026-10-27",
@@ -46,16 +47,59 @@ test("drop creates simultaneous daily blocks and shared PM/corrective capacity",
   assert.equal(dayLoad(plan, "A", "2026-10-27"), 8);
   assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-27", "A"), /totalmente alocada/);
 });
-test("date constraints reject exact drops with clear Portuguese messages", () => {
+test("manual multi-person drop uses only the explicitly selected crew", () => {
+  const plan = fixture();
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: 2, pessoas: 2 };
+
+  const result = distributeBatch(plan, ["RES:PM1"], "A", plan.inicio, true, ["A", "B"]);
+
+  assert.equal(result.blocos.length, 1);
+  assert.deepEqual(result.blocos[0].executantes, ["A", "B"]);
+  const invalidTeam = distributeBatch(plan, ["RES:PM1"], "A", plan.inicio, true, ["A"]);
+  assert.equal(invalidTeam.blocos.length, 0);
+  assert.match(invalidTeam.mensagens[0], /exatamente 2 executantes/);
+});
+test("not-before stays enforced while a late exact drop is allowed and marked", () => {
   const plan = fixture(), order = plan.ordens[0];
   plan.fim = "2026-10-28";
+  for (const person of plan.pessoas) person.dias.push("2026-10-28");
   order.dados = { sneconstraint: "2026-10-27", fnlconstraint: "2026-10-27" };
   assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /PM1: não iniciar antes de 27\/10\/2026/);
-  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-28", "A"), /PM1: não terminar depois de 27\/10\/2026/);
+  assert.equal(activityDateConstraintError(order, "2026-10-28"), null);
+  assert.equal(activityDateStatus(order, "2026-10-28"), "late");
+  assert.equal(dropActivity(plan, "RES:PM1", "2026-10-28", "A").length, 1);
   assert.match(activityDateConstraintError(order, "2026-10-26"), /não iniciar antes/);
   const invalidDrop = distributeBatch(plan, ["RES:PM1"], "A", "2026-10-26", true);
   assert.equal(invalidDrop.blocos.length, 0);
   assert.match(invalidDrop.mensagens[0], /não iniciar antes/);
+  const lateDrop = distributeBatch(plan, ["RES:PM1"], "A", "2026-10-28", true);
+  assert.equal(lateDrop.blocos[0].dia, "2026-10-28");
+});
+test("dropping on an executor name may allocate late and still reports the deadline", () => {
+  const plan = fixture();
+  plan.fim = "2026-10-28";
+  plan.blocos = [];
+  for (const person of plan.pessoas) person.dias.push("2026-10-28");
+  plan.ordens[0].dados = { sneconstraint: plan.inicio, fnlconstraint: "2026-10-27" };
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: 1, pessoas: 1 };
+
+  const result = distributeBatch(plan, ["RES:PM1"], "A", "2026-10-28");
+
+  assert.equal(result.blocos[0].dia, "2026-10-28");
+  assert.match(activityDateWarning(plan.ordens[0], result.blocos[0].dia), /atraso/);
+});
+test("same-week reordering can move an activity past the BMA finish constraint", () => {
+  const plan = fixture();
+  plan.fim = "2026-10-28";
+  for (const person of plan.pessoas) person.dias.push("2026-10-28");
+  plan.ordens[0].dados = { sneconstraint: plan.inicio, fnlconstraint: "2026-10-27" };
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: 1, pessoas: 1 };
+  plan.blocos = [{ id: "late-move", ot: "RES:PM1", dia: plan.inicio, inicio: 0, horas: 1, executantes: ["A"] }];
+
+  const moved = resequenceWeek(plan, "late-move", "A", "A", "2026-10-28");
+
+  assert.equal(moved[0].dia, "2026-10-28");
+  assert.equal(activityDateStatus(plan.ordens[0], moved[0].dia), "late");
 });
 test("drag preparation uses BMA estimates and safe defaults without inventing duration", () => {
   const plan = fixture();
@@ -72,6 +116,26 @@ test("drag preparation uses BMA estimates and safe defaults without inventing du
   const noEstimate = { ...plan, ordens: [{ siteid: "RES", wonum: "PM1", dados: { worktype: "S" } }] };
   assert.equal(prepareDraggedOrder(noEstimate, "RES:PM1").requisitos["RES:PM1"].duracao, null);
 });
+test("collected preparation flags an OT with multiple specialty requirements and one assigned person", () => {
+  const plan = fixture();
+  plan.ordens[0].dados = { wplabor_origem: "Preparação", wplabor: [
+    { especialidade: "180", quantidade: "1", "horas normais": "4" },
+    { especialidade: "300", quantidade: "1", "horas normais": "2" },
+  ] };
+  plan.blocos = [{ id: "b1", ot: "RES:PM1", dia: plan.inicio, inicio: 0, horas: 4, executantes: ["A"] }];
+
+  const requirements = preparationRequirements(plan.ordens[0]);
+  const understaffed = underAllocatedPreparationOrders(plan);
+
+  assert.deepEqual(requirements.map((row) => [row.especialidade, row.quantidade, row.horas_normais]), [
+    ["180", 1, "4"], ["300", 1, "2"],
+  ]);
+  assert.equal(understaffed.length, 1);
+  assert.equal(understaffed[0].requiredCount, 2);
+  assert.equal(understaffed[0].missingCount, 1);
+  plan.blocos[0].executantes.push("B");
+  assert.equal(underAllocatedPreparationOrders(plan).length, 0);
+});
 test("complete dragged orders are ready for automatic confirmation only without pending work or conflicts", () => {
   const plan = fixture();
   plan.ordens[0].dados.estdur = 4;
@@ -85,13 +149,13 @@ test("complete dragged orders are ready for automatic confirmation only without 
   assert.equal(readyForAutoConfirmation({ ...ready, posicionamentos: [{ ot: "RES:E1", executante: "A", dia: plan.inicio }] }), false);
   assert.equal(readyForAutoConfirmation({ ...ready, requisitos: { ...ready.requisitos, "RES:E1": { ...ready.requisitos["RES:E1"], selecionada: true } } }), false);
 });
-test("drop refuses absence, missing preparation and incompatible specialty", () => {
+test("drop refuses absence and missing preparation but allows different specialties", () => {
   const plan = fixture();
   plan.indisponibilidades = [{ executante: "A", dia: "2026-10-26", motivo: "Falta" }];
   assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /equipe compatível/);
   plan.indisponibilidades = [];
   plan.pessoas[1].funcao = "OTHER";
-  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /equipe compatível/);
+  assert.deepEqual(dropActivity(plan, "RES:PM1", "2026-10-26", "A")[0].executantes, ["A", "B"]);
   plan.requisitos["RES:PM1"].pessoas = null;
   assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "A"), /Prepare/);
 });
@@ -119,7 +183,7 @@ test("all specialties permits mixed crew without bypassing absences or simultane
   assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "B"), /equipe compatível/);
   plan.indisponibilidades = [];
   plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], todas_especialidades: false, orgid: "BR", funcao: "180" };
-  assert.throws(() => dropActivity(plan, "RES:PM1", "2026-10-26", "B"), /equipe compatível/);
+  assert.deepEqual(dropActivity(plan, "RES:PM1", "2026-10-26", "B")[0].executantes, ["B", "A"]);
 });
 
 test("batch uses 10 free hours and leaves 2 pending instead of exceeding the week", () => {
@@ -190,16 +254,21 @@ test("specialty filter uses collected BMA labor, supports multiple specialties a
   assert.equal(matchesOrderSpecialty(order, req, "210"), true);
   assert.equal(matchesOrderSpecialty(order, req, "180"), false);
   assert.equal(matchesOrderSpecialty(order, req, "indefinida"), false);
+  order.dados.estdur = 4;
+  order.dados.wplabor = [{ especialidade: "300", quantidade: "1", "horas normais": "0:30" }];
+  assert.deepEqual(plannedLabor(order)[0], { craft: "300", orgid: "", quantity: "1", hours: "0:30", skill: "" });
+  assert.equal(matchesOrderSpecialty(order, req, "300"), true);
+  assert.deepEqual(missingPlanningData(order), []);
   order.dados.wplabor = [];
   req.funcao = "";
   assert.equal(matchesOrderSpecialty(order, req, "indefinida"), true);
   req.todas_especialidades = true;
   assert.equal(matchesOrderSpecialty(order, req, "qualquer"), true);
 });
-test("missing BMA duration, craft or quantity is identified for red schedule borders", () => {
+test("missing BMA duration or quantity is identified for red schedule borders", () => {
   const order = fixture().ordens[0];
   order.dados.estdur = 4;
-  assert.deepEqual(missingPlanningData(order), ["especialidade", "quantidade de mão de obra"]);
+  assert.deepEqual(missingPlanningData(order), ["quantidade de mão de obra"]);
   order.dados.wplabor = [{ craft: { value: "180" }, quantity: { _value: 1 }, laborhrs: 4 }];
   assert.deepEqual(missingPlanningData(order), []);
   delete order.dados.estdur;
@@ -268,12 +337,13 @@ test("pending portfolio hides complete orders, retains partials, and restores re
   assert.equal(pendingActivity(plan, "RES:PM1"), true);
 });
 
-test("drop with missing preparation identifies the fields instead of pretending allocation succeeded", () => {
+test("specialty is optional preparation data while people count is still required", () => {
   const plan = fixture();
   plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], pessoas: null, funcao: "", orgid: "" };
   const result = distributeBatch(plan, ["RES:PM1"], "A");
   assert.equal(result.blocos.length, 0);
-  assert.match(result.mensagens[0], /quantidade de pessoas, especialidade/);
+  assert.match(result.mensagens[0], /quantidade de pessoas/);
+  assert.doesNotMatch(result.mensagens[0], /especialidade/);
 });
 
 test("positioned estimated hours preview daily occupancy without reserving capacity", () => {
@@ -344,17 +414,28 @@ test("manual scheduling uses selected crew count and fails atomically for insuff
   assert.throws(() => scheduleSelectedDays(plan, "RES:PM1", [plan.inicio, plan.fim], ["A"]), /indisponível/);
 });
 
-test("BMA suggested days use target/planned dates clipped to planning days, without substituting constraints", () => {
+test("BMA finish constraint marks late days while target start remains a soft target", () => {
   const plan = fixture(), order = plan.ordens[0];
-  order.dados = { targstartdate: plan.inicio, targcompdate: plan.fim, sneconstraint: "2026-10-01" };
-  assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim, "2026-10-28"]), [plan.inicio, plan.fim]);
+  order.dados = { targstartdate: "2026-10-27", targcompdate: "2026-10-29", sneconstraint: plan.inicio, fnlconstraint: "2026-10-28" };
+  assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim, "2026-10-28", "2026-10-29"]), [plan.inicio, plan.fim, "2026-10-28"]);
+  assert.equal(isTargetDay(order, plan.inicio), false);
   assert.equal(isTargetDay(order, "2026-10-27"), true);
   assert.equal(isTargetDay(order, "2026-10-28"), false);
+  assert.equal(isTargetDay(order, "2026-10-29"), false);
+  assert.equal(activityDateStatus(order, "2026-10-27"), "target");
+  assert.equal(activityDateStatus(order, "2026-10-28"), "window");
+  assert.equal(activityDateStatus(order, "2026-10-29"), "late");
+  assert.match(activityDateWarning(order, "2026-10-29"), /prazo de 28\/10\/2026 ultrapassado/);
   order.dados = { schedstart: `${plan.fim}T08:00:00-03:00` };
-  assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim]), [plan.fim]);
-  assert.equal(isTargetDay(order, plan.fim), false);
-  order.dados = { sneconstraint: plan.inicio };
-  assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim]), []);
+  assert.equal(isTargetDay(order, plan.fim), true);
+  order.dados = { sneconstraint: "2026-10-27", fnlconstraint: "2026-10-28" };
+  assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim, "2026-10-28", "2026-10-29"]), [plan.fim, "2026-10-28"]);
+  order.dados = {};
+  assert.deepEqual(proposedDays(order, [plan.inicio, plan.fim]), [plan.inicio, plan.fim]);
+});
+test("gallery shows only PREPARED, WSCH and WFSCH BMA statuses", () => {
+  for (const status of ["PREPARED", "WSCH", "WFSCH"]) assert.equal(isGalleryBmaStatus(status), true);
+  for (const status of ["APPR", "INPRG", "COMP", "CLOSE", "CAN", ""]) assert.equal(isGalleryBmaStatus(status), false);
 });
 
 test("exact drop on unavailable date must not silently move to another cell", () => {
@@ -396,7 +477,7 @@ test("moving a continuation before the first card reschedules whole activities, 
   assert.equal(dayLoad({ ...plan, blocos: blocks }, "A", plan.inicio), 8);
 });
 
-test("sequence move to another person changes only source crew member and preserves other allocated work", () => {
+test("sequence move to another specialty changes only source crew member and preserves other allocated work", () => {
   const plan = sequenceFixture();
   const moving = plan.blocos[0];
   const blocks = resequenceWeek(plan, moving.id, "A", "B", plan.inicio);
@@ -404,7 +485,8 @@ test("sequence move to another person changes only source crew member and preser
   assert.equal(allocatedDuration({ ...plan, blocos: blocks }, moving.ot), 6);
   assert.equal(allocatedDuration({ ...plan, blocos: blocks }, "RES:E1"), 6);
   plan.pessoas.push({ id: "C", orgid: "BR", funcao: "OTHER", dias: [plan.inicio, plan.fim] });
-  assert.throws(() => resequenceWeek(plan, moving.id, "A", "C", plan.inicio), /incompatível/);
+  const crossSpecialtyBlocks = resequenceWeek(plan, moving.id, "A", "C", plan.inicio);
+  assert.ok(crossSpecialtyBlocks.filter((b) => b.ot === moving.ot).every((b) => b.executantes.join() === "C"));
 });
 
 test("failed sequence changes preserve all original blocks for constraints, absences, full week and mixed crews", () => {
@@ -416,7 +498,8 @@ test("failed sequence changes preserve all original blocks for constraints, abse
   assert.throws(() => resequenceWeek(plan, moving.id, "A", "B", plan.inicio), /Nenhuma alocação/);
   plan.indisponibilidades = [];
   plan.ordens[0].dados.fnlconstraint = plan.inicio;
-  assert.throws(() => resequenceWeek(plan, moving.id, "A", "A", plan.fim), /Nenhuma alocação/);
+  const lateBlocks = resequenceWeek(plan, moving.id, "A", "A", plan.fim);
+  assert.ok(lateBlocks.some((block) => block.ot === moving.ot && block.dia >= plan.fim));
   plan.ordens[0].dados.fnlconstraint = "";
   plan.blocos[2].executantes = ["B"];
   assert.throws(() => resequenceWeek(plan, moving.id, "A", "A", plan.inicio), /equipes diferentes/);
@@ -431,4 +514,38 @@ test("joint activities stay simultaneous when reordered and cannot collapse crew
   assert.equal(allocatedDuration({ ...plan, blocos: blocks }, "RES:PM1"), 10);
   assert.equal(allocatedDuration({ ...plan, blocos: blocks }, "RES:E1"), 6);
   assert.throws(() => resequenceWeek(plan, moving.id, "A", "B", plan.inicio), /já integra/);
+});
+
+test("labor shortage offers available helpers across specialties and records weekly overtime", () => {
+  const plan = fixture();
+  plan.pessoas[1].funcao = "210";
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: 2, pessoas: 1 };
+  plan.blocos = [{ id: "pm", ot: "RES:PM1", dia: plan.inicio, inicio: 0, horas: 2, executantes: ["A"] }];
+  plan.blocos.push({ id: "busy-1", ot: "RES:E1", dia: plan.inicio, inicio: 0, horas: 8, executantes: ["B"] });
+  plan.blocos.push({ id: "busy-2", ot: "RES:E1", dia: plan.fim, inicio: 0, horas: 8, executantes: ["B"] });
+  const labor = [{ especialidade: "180", orgid: "BR", quantidade: 2, horas_normais: "2" }];
+  const candidates = laborHelperCandidates(plan, "RES:PM1", labor);
+  assert.deepEqual(candidates.map(({ person, overtimeMinimum }) => [person.id, overtimeMinimum]), [["B", 2]]);
+  const updated = addLaborHelper(plan, "RES:PM1", "B", 2, labor);
+  assert.deepEqual(updated.blocos[0].executantes, ["A", "B"]);
+  assert.deepEqual(updated.horas_extras, [{ ot: "RES:PM1", executante: "B", dia: plan.inicio, horas: 2 }]);
+  assert.equal(weeklyBalance(updated, "B", plan.inicio).remaining, 0);
+  assert.equal(planningMetrics(updated).capacity, 34);
+  assert.equal(specialtyWorkload(updated).reduce((sum, row) => sum + row.capacidade, 0), 34);
+  const returned = returnOrderToPortfolio(updated, "RES:PM1");
+  assert.equal(returned.blocos.some((block) => block.ot === "RES:PM1"), false);
+  assert.equal(returned.horas_extras.length, 0);
+  assert.equal(returned.requisitos["RES:PM1"].selecionada, false);
+});
+
+test("labor helper is excluded when absent on any OT date", () => {
+  const plan = fixture();
+  plan.requisitos["RES:PM1"] = { ...plan.requisitos["RES:PM1"], duracao: 2, pessoas: 1 };
+  plan.blocos = [
+    { id: "pm-1", ot: "RES:PM1", dia: plan.inicio, inicio: 0, horas: 1, executantes: ["A"] },
+    { id: "pm-2", ot: "RES:PM1", dia: plan.fim, inicio: 0, horas: 1, executantes: ["A"] },
+  ];
+  plan.pessoas[1].dias = [plan.inicio];
+  const labor = [{ especialidade: "180", orgid: "BR", quantidade: 2, horas_normais: "2" }];
+  assert.deepEqual(laborHelperCandidates(plan, "RES:PM1", labor), []);
 });

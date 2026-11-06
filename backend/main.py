@@ -1,5 +1,10 @@
-from fastapi import FastAPI
+import hmac
+import os
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from api.routes import router
 from api.pcm import router as pcm_router
@@ -10,6 +15,15 @@ app = FastAPI(
     description="Processamento de planilhas de anomalias para criação de OT no BMA.",
     version="1.0.0",
 )
+
+
+@app.middleware("http")
+async def protect_desktop_backend(request: Request, call_next):
+    token = os.environ.get("BMA_DESKTOP_TOKEN", "")
+    if token and not hmac.compare_digest(request.headers.get("x-planning-token", ""), token):
+        return JSONResponse({"detail": "Acesso local nao autorizado."}, status_code=403)
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +41,31 @@ app.add_middleware(
 
 app.include_router(router, prefix="/api")
 app.include_router(pcm_router, prefix="/api")
+
+
+def authenticate_desktop_browser():
+    import logging
+    from services.BMAService import BMAService
+
+    driver = None
+    try:
+        service = BMAService()
+        driver = service._create_browser(headless=False)
+        driver.get(service.wotrack_url)
+        service._wait_for_work_tracking(driver)
+    except Exception:
+        logging.exception("Falha na autenticacao interativa BMA")
+    finally:
+        if driver:
+            driver.quit()
+
+
+@app.post("/api/desktop/authenticate", status_code=202)
+def authenticate_desktop(background_tasks: BackgroundTasks):
+    if os.getenv("BMA_DESKTOP") != "1":
+        raise HTTPException(status_code=404)
+    background_tasks.add_task(authenticate_desktop_browser)
+    return {"status": "starting"}
 
 
 @app.on_event("startup")

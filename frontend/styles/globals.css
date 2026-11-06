@@ -1,3 +1,5 @@
+@import "./themes.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -5,10 +7,10 @@
 body {
   min-height: 100vh;
   background:
-    radial-gradient(1200px 500px at 10% -10%, rgba(245, 193, 74, 0.12), transparent 50%),
-    radial-gradient(900px 400px at 100% 0%, rgba(56, 189, 248, 0.08), transparent 45%),
-    #07111f;
-  color: #e8eef6;
+    radial-gradient(1100px 420px at 0% -10%, rgb(var(--primary) / 0.08), transparent 55%),
+    radial-gradient(900px 380px at 100% 0%, rgb(var(--accent) / 0.06), transparent 50%),
+    rgb(var(--background));
+  color: rgb(var(--foreground));
 }
 
 ::-webkit-scrollbar {
@@ -17,41 +19,82 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334b67;
+  background: rgb(var(--border));
   border-radius: 8px;
+}
+
+:focus-visible {
+  outline: 2px solid rgb(var(--ring));
+  outline-offset: 2px;
 }
 
 @layer components {
   .pcm-workspace {
-    background: radial-gradient(ellipse at 50% 0%, rgba(0, 91, 170, 0.1), transparent 60%);
+    background: radial-gradient(ellipse at 50% 0%, rgb(var(--primary) / 0.06), transparent 60%);
   }
   .pcm-allocation-dock {
-    background: rgba(8, 23, 41, 0.96);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+    background: rgb(var(--surface-elevated) / 0.96);
+    box-shadow: 0 12px 32px rgb(var(--shadow-color) / calc(var(--shadow-strength) * 2));
   }
   .pcm-activity-card {
     animation: pcm-activity-enter 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    container-type: inline-size;
+  }
+  @container (max-width: 159px) {
+    .pcm-activity-card .pcm-card-period-panel { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) !important; gap: 4px !important; padding: 5px !important; }
+    .pcm-card-period-panel > :last-child,
+    .pcm-activity-card .pcm-card-location,
+    .pcm-activity-card .pcm-card-target,
+    .pcm-activity-card .pcm-card-preparation { display: none !important; }
+    .pcm-activity-card .pcm-card-description { max-height: 5rem !important; font-size: 9px !important; }
+  }
+  @container (max-width: 89px) {
+    .pcm-activity-card .pcm-card-main { padding-right: 4px !important; padding-left: 6px !important; }
+    .pcm-activity-card .pcm-card-heading { gap: 2px !important; padding-left: 25px !important; }
+    .pcm-activity-card .pcm-card-wonum { font-size: 9px !important; }
+    .pcm-activity-card .pcm-card-type { padding: 1px 3px !important; font-size: 7px !important; }
+    .pcm-activity-card .pcm-card-period-panel,
+    .pcm-activity-card .pcm-card-location,
+    .pcm-activity-card .pcm-card-target,
+    .pcm-activity-card .pcm-card-preparation,
+    .pcm-activity-card .pcm-card-drag { display: none !important; }
+    .pcm-activity-card .pcm-card-description { max-height: 8rem !important; font-size: 9px !important; }
+    .pcm-activity-card .pcm-card-bma-badge { max-width: 100% !important; font-size: 8px !important; }
+    .pcm-activity-card .pcm-card-cloud { top: 4px !important; left: 4px !important; width: 24px !important; height: 24px !important; padding: 2px !important; box-shadow: none !important; }
+    .pcm-activity-card .pcm-card-cloud svg { width: 15px !important; height: 15px !important; }
+    .pcm-activity-card .pcm-card-edit { right: 3px !important; bottom: 3px !important; }
   }
   .pcm-panel {
-    @apply min-w-0 rounded-2xl border border-white/10;
-    background: linear-gradient(145deg, rgba(17, 37, 60, 0.88), rgba(10, 24, 41, 0.94));
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.025);
-    backdrop-filter: blur(12px);
+    @apply min-w-0 rounded-2xl border border-border shadow-card;
+    background: linear-gradient(145deg, rgb(var(--card)), rgb(var(--surface)));
   }
   .pcm-title {
-    @apply flex items-center gap-2 text-sm font-semibold text-slate-200;
+    @apply flex items-center gap-2 text-sm font-semibold text-foreground;
   }
   .pcm-caption {
-    @apply mt-2 text-xs leading-relaxed text-slate-500;
+    @apply mt-2 text-xs leading-relaxed text-muted-foreground;
   }
   .pcm-badge {
-    @apply inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[10px] font-medium;
+    @apply inline-flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-[10px] font-medium;
   }
   .pcm-small-button {
-    @apply inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-sky-400/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-foreground/80 transition hover:border-primary/40 hover:bg-secondary hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40;
   }
   .pcm-primary-button {
-    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-accent-400/60 bg-accent-400 px-4 py-2 text-sm font-semibold text-navy-950 transition hover:bg-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-400 focus:ring-offset-2 focus:ring-offset-navy-950 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-slate-500;
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-primary bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:border-border disabled:bg-muted disabled:text-muted-foreground;
+  }
+  /* Campos escuros fixos das telas antigas passam a seguir a superfície do tema. */
+  .bg-\[\#081729\], .bg-\[\#0b1a2e\], .bg-\[\#10243b\] {
+    background-color: rgb(var(--surface-sunken)) !important;
+  }
+  .bg-\[\#102235\], .bg-\[\#123653\], .bg-\[\#0b2830\] {
+    background-color: rgb(var(--surface-elevated)) !important;
+  }
+  /* Amarelo como cor de texto não tem contraste em fundo claro; nos temas claros o texto de destaque vira azul. */
+  html:not([data-theme="command-center"]) .text-accent-300,
+  html:not([data-theme="command-center"]) .text-accent-400,
+  html:not([data-theme="command-center"]) .text-accent-500 {
+    color: rgb(var(--primary));
   }
 }
 

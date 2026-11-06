@@ -3,6 +3,9 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { AlertCircle, ArrowRight, CheckCircle2, LoaderCircle, X } from "lucide-react";
+import PlanningWorkflowSteps from "@/components/PlanningWorkflowSteps";
+import PlanejamentoOtsPage from "@/pages/planejamento/ots";
+import AllocationPage from "@/pages/planejamento/alocacao";
 import planningOptions from "@/data/planejamento-opcoes.json";
 import {
   obterSincronizacao,
@@ -58,12 +61,15 @@ async function watchSynchronization(
 
 export default function PlanejamentoPage() {
   const router = useRouter();
+  const workflowStage = Number(router.query.etapa) || 1;
+  const routeSectors = Array.isArray(router.query.setor) ? router.query.setor : router.query.setor ? [router.query.setor] : [];
+  const planId = typeof router.query.plano === "string" ? router.query.plano : "";
   const [sectors, setSectors] = useState<string[]>([]);
   const [sectorQuery, setSectorQuery] = useState("");
   const [sectorMenuOpen, setSectorMenuOpen] = useState(false);
   const [activeSectorIndex, setActiveSectorIndex] = useState(0);
   const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [error, setError] = useState("");
 
@@ -108,12 +114,17 @@ export default function PlanejamentoPage() {
   }
 
   useEffect(() => {
+    if (!router.isReady || workflowStage !== 1) return;
     let cancelled = false;
 
     async function restoreLatestSync() {
       try {
         const latest = await obterUltimaSincronizacao();
-        if (!latest || cancelled) return;
+        if (cancelled) return;
+        if (!latest) {
+          setLoading(false);
+          return;
+        }
 
         setSyncRun(latest);
         setSectors(latest.setores);
@@ -142,7 +153,7 @@ export default function PlanejamentoPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [router.isReady, workflowStage]);
 
   async function handleSynchronize() {
     setLoading(true);
@@ -163,15 +174,23 @@ export default function PlanejamentoPage() {
   }
 
   function handleContinue() {
-    void router.push({ pathname: "/planejamento/ots", query: { setor: sectors } });
+    void router.push({ pathname: "/planejamento", query: { etapa: "2", setor: sectors } });
   }
+
+  if (router.isReady && workflowStage === 2) {
+    return <PlanejamentoOtsPage sectors={routeSectors} onPlanCreated={(createdPlanId) => {
+      void router.push({ pathname: "/planejamento", query: { etapa: "3", setor: routeSectors, plano: createdPlanId } });
+    }} />;
+  }
+  if (router.isReady && workflowStage === 3 && planId) return <AllocationPage planId={planId} />;
 
   return (
     <>
       <Head>
-        <title>Planejamento | BMA Intranet</title>
+        <title>Coleta BMA | Planning & Scheduling Michelin</title>
       </Head>
       <main className="mx-auto min-h-screen max-w-5xl px-4 py-10 sm:px-6">
+        <PlanningWorkflowSteps active={1} />
         <header className="mb-8">
           <p className="text-xs font-medium uppercase tracking-[0.16em] text-accent-400">Planejamento</p>
           <h1 className="mt-2 text-2xl font-semibold text-white">Coletar OTs do BMA</h1>
@@ -277,8 +296,8 @@ export default function PlanejamentoPage() {
 
         <div className="mt-8 flex flex-wrap items-center gap-3">
           <button type="button" disabled={sectors.length === 0 || loading} onClick={handleSynchronize}
-            className="pcm-primary-button disabled:opacity-40">
-            {loading ? "Atualizando banco de dados..." : "Atualizar banco de dados · OTs do BMA"}
+            className="pcm-primary-button">
+            {loading ? <><LoaderCircle size={16} className="animate-spin" /> Carregando / atualizando banco...</> : "Atualizar banco de dados · OTs do BMA"}
           </button>
           {canContinue && (
             <button
@@ -290,6 +309,7 @@ export default function PlanejamentoPage() {
             </button>
           )}
           <p className="w-full text-xs text-slate-400">Consulta novamente as OTs dos setores selecionados, incluindo mão de obra planejada (especialidade, quantidade e horas). O acesso ao BMA ocorre em segundo plano; se exigir MFA ou uma etapa manual, a coleta será interrompida. Não atualiza o cadastro de funcionários.</p>
+          {loading && !syncModalOpen && <p role="status" className="flex items-center gap-2 text-sm text-sky-200"><LoaderCircle size={16} className="animate-spin" /> Consultando o estado da última coleta...</p>}
           {error && <p className="mt-4 text-sm text-rose-300" role="alert">{error}</p>}
         </div>
 

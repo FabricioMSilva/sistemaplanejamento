@@ -12,6 +12,7 @@ def normalizar(value: str) -> str:
 def vincular_ativos(roster: list[dict], people: list[dict], mappings: dict) -> dict:
     identities = {(p["orgid"], p["matricula"]): p for p in people}
     proposals = []
+    explicitly_mapped = set()
     for row in roster:
         explicit = mappings.get(str(row["id"]))
         matches = []
@@ -19,18 +20,23 @@ def vincular_ativos(roster: list[dict], people: list[dict], mappings: dict) -> d
             key = (explicit["orgid"], explicit["matricula"])
             if key in identities:
                 matches = [key]
+                explicitly_mapped.add(key)
         elif row.get("matricula"):
             matches = [key for key, p in identities.items()
                        if normalizar(row["matricula"]) in {normalizar(p["matricula"]), normalizar(p.get("personid") or "")}]
         else:
             matches = [key for key, p in identities.items() if normalizar(row["nome"]) == normalizar(p["nome"])]
-        proposals.append((row, matches))
+        proposals.append((row, matches, bool(explicit)))
     counts = {}
-    for _, matches in proposals:
+    proposals = [
+        (row, matches if explicit else [key for key in matches if key not in explicitly_mapped], explicit)
+        for row, matches, explicit in proposals
+    ]
+    for _, matches, _ in proposals:
         if len(matches) == 1:
             counts[matches[0]] = counts.get(matches[0], 0) + 1
     linked, pending = [], []
-    for row, matches in proposals:
+    for row, matches, _ in proposals:
         if len(matches) == 1 and counts[matches[0]] == 1:
             linked.append({**row, "orgid": matches[0][0], "matricula_bma": matches[0][1]})
         else:

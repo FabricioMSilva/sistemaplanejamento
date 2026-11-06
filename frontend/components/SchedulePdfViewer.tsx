@@ -25,7 +25,7 @@ export default function SchedulePdfViewer({ file }: { file: Blob }) {
         loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
         const loaded = await loadingTask.promise;
         if (cancelled) {
-          await loaded.destroy();
+          await loadingTask.destroy();
           return;
         }
         setDocument(loaded);
@@ -75,11 +75,13 @@ export default function SchedulePdfViewer({ file }: { file: Blob }) {
         canvas.height = Math.ceil(viewport.height * outputScale);
         canvas.style.width = `${Math.floor(viewport.width)}px`;
         canvas.style.height = `${Math.floor(viewport.height)}px`;
-        renderTask = page.render({
+        const renderParameters = {
+          canvas: null,
           canvasContext: context,
           viewport,
           transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
-        });
+        };
+        renderTask = page.render(renderParameters);
         await renderTask.promise;
       } catch (failure) {
         if (!cancelled && !(failure instanceof Error && failure.name === "RenderingCancelledException"))

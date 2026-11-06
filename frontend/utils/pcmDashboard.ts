@@ -12,6 +12,13 @@ export function localDate(value: string): string | null {
 }
 export function orderInPeriod(order: OrdemTrabalho, start: string, end: string): boolean {
   if (!periodoValido(start, end)) return false;
+  const constraintStart = localDate(cellText(order, "sneconstraint"));
+  const constraintEnd = localDate(cellText(order, "fnlconstraint"));
+  if (constraintStart || constraintEnd) {
+    return (!constraintStart || constraintStart <= end)
+      && (!constraintEnd || constraintEnd >= start)
+      && (!constraintStart || !constraintEnd || constraintStart <= constraintEnd);
+  }
   const targetStart = localDate(cellText(order, "targstartdate"));
   const targetEnd = localDate(cellText(order, "targcompdate"));
   const scheduledStart = localDate(cellText(order, "schedstart"));
@@ -30,6 +37,71 @@ export function numericField(order: OrdemTrabalho, key: string): number | null {
 }
 export function isPreventiveOrder(order: OrdemTrabalho): boolean {
   return ["I", "S"].includes(getWorkType(order)) && /^PM/i.test(cellText(order, "description").trim());
+}
+function activePlanningOrders(orders: OrdemTrabalho[], period: { inicio: string; fim: string } | null) {
+  if (!period || !periodoValido(period.inicio, period.fim)) return [];
+  return orders.filter((order) => !["CAN", "CLOSE", "COMP", "HISTEDIT"].includes(order.status.toUpperCase())
+    && (isPreventiveOrder(order) || isCorrectiveAvailable(order))
+    && orderInPeriod(order, period.inicio, period.fim));
+}
+function laborText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object") return String(value).trim();
+  const nested = value as Record<string, unknown>;
+  return String(nested.value ?? nested._value ?? nested.description ?? "").trim();
+}
+function laborLineComplete(line: unknown): boolean {
+  if (!line || typeof line !== "object") return false;
+  const row = line as Record<string, unknown>;
+  const specialty = laborText(row.especialidade ?? row.craft ?? row.craftid);
+  const quantity = laborText(row.quantidade ?? row.quantity);
+  return !!specialty && !!quantity;
+}
+export function preparationOrders(
+  orders: OrdemTrabalho[], period: { inicio: string; fim: string } | null,
+): OrdemTrabalho[] {
+  return activePlanningOrders(orders, period).filter((order) => {
+    const labor = order.dados.wplabor;
+    if (!Array.isArray(labor)) return true;
+    const populated = labor.filter((line) => line && typeof line === "object"
+      && Object.values(line as Record<string, unknown>).some((value) => laborText(value)));
+    return !populated.length || populated.some((line) => !laborLineComplete(line));
+  });
+}
+export function specialtyPareto(
+  orders: OrdemTrabalho[], mode: "pm" | "corretiva" | "all", period: { inicio: string; fim: string } | null,
+  specialtyNames: Map<string, string> = new Map(),
+  availableBySpecialty: Map<string, number> = new Map(),
+  capacityReady = false,
+) {
+  const hoursBySpecialty = new Map<string, number>();
+  for (const order of activePlanningOrders(orders, period)) {
+    if (mode === "pm" && !isPreventiveOrder(order)) continue;
+    if (mode === "corretiva" && !isCorrectiveAvailable(order)) continue;
+    const labor = order.dados.wplabor;
+    if (!Array.isArray(labor)) continue;
+    for (const row of labor) {
+      if (!row || typeof row !== "object") continue;
+      const values = row as Record<string, unknown>;
+      const raw = values.especialidade ?? values.craft ?? values.craftid;
+      const nested = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+      const specialty = String(nested?.value ?? nested?._value ?? nested?.description ?? raw ?? "").trim();
+      const rawHours = laborText(values["horas normais"] ?? values.horas_normais ?? values.laborhrs ?? values.hours);
+      const clock = rawHours.match(/^(\d+):(\d{1,2})(?::(\d{1,2}))?$/);
+      const parsedHours = clock
+        ? Number(clock[1]) + Number(clock[2]) / 60 + Number(clock[3] ?? 0) / 3600
+        : Number(rawHours.includes(",") ? rawHours.replace(/\./g, "").replace(",", ".") : rawHours);
+      if (specialty && rawHours && Number.isFinite(parsedHours) && parsedHours >= 0) {
+        hoursBySpecialty.set(specialty, (hoursBySpecialty.get(specialty) ?? 0) + parsedHours);
+      }
+    }
+  }
+  return [...hoursBySpecialty].map(([code, value]) => ({
+    label: specialtyNames.get(code) || code,
+    value,
+    availableHours: capacityReady ? availableBySpecialty.get(code) ?? 0 : null,
+  }))
+    .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label, "pt-BR"));
 }
 export function daysBetween(start: string, end: string): string[] {
   if (!periodoValido(start, end)) return [];
@@ -58,10 +130,12 @@ export function buildDashboard(
   period: { inicio: string; fim: string } | null = null,
   requirePeriod = false,
 ) {
-  const sectorPending = orders.filter((order) => !["CAN", "CLOSE", "COMP", "HISTEDIT"].includes(order.status.toUpperCase()));
+  const openOrders = orders.filter((order) => !["CAN", "CLOSE", "COMP", "HISTEDIT"].includes(order.status.toUpperCase()));
   const periodFilterActive = !!period && periodoValido(period.inicio, period.fim);
-  const pending = periodFilterActive ? sectorPending.filter((order) => getWorkType(order) === "E" || orderInPeriod(order, period.inicio, period.fim))
-    : requirePeriod ? [] : sectorPending;
+  const planningOrders = openOrders.filter((order) => isPreventiveOrder(order) || isCorrectiveAvailable(order));
+  const sectorPending = periodFilterActive ? planningOrders : openOrders;
+  const pending = periodFilterActive ? planningOrders.filter((order) => orderInPeriod(order, period.inicio, period.fim))
+    : requirePeriod ? [] : openOrders;
   const people = new Map((labor?.profissionais ?? []).map((person) => [chaveExecutante(person), person]));
   const days = plan ? daysBetween(plan.inicio, plan.fim) : [];
   const team = (plan?.executantes ?? []).map((member) => {
@@ -135,10 +209,11 @@ export function buildDashboard(
     adjustments: team.reduce((sum, row) => sum + row.member.ajuste_horas, 0),
     pm: portfolio(availablePm, ["I", "S"]),
     pmAllRows: pmCandidates,
-    pmExcluded: pending.filter((order) => ["I", "S"].includes(getWorkType(order)) && !isPreventiveOrder(order)).length,
+    pmExcluded: openOrders.filter((order) => ["I", "S"].includes(getWorkType(order)) && !isPreventiveOrder(order)
+      && (!periodFilterActive || orderInPeriod(order, period.inicio, period.fim))).length,
     pmAlreadyPlannedExcluded,
     pmUnverifiedExcluded: pmCandidates.filter((order) => planningStatus(order) === "Não verificada").length,
-    corrective: portfolio(sectorPending.filter(isCorrectiveAvailable), ["E"]),
+    corrective: portfolio(pending.filter(isCorrectiveAvailable), ["E"]),
   };
 }
 export type PcmData = ReturnType<typeof buildDashboard>;

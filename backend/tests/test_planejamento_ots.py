@@ -55,6 +55,26 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
         self.assertEqual(len(run["eventos"]), 3)
         self.assertEqual(run["eventos"][-1]["nivel"], "error")
 
+    def test_ot_history_combines_creation_requests_and_planning_results_with_filters(self):
+        database.registrar_historico_ot(
+            "criacao_solicitada", "solicitado", "Criar OT", wonum="", siteid="RES",
+            detalhes={"arquivo": "ordens.xlsx", "resumo": "Inspeção bomba"},
+        )
+        database.registrar_envio_bma("envio-1", "plano-1", {
+            "numero_ot": "RES123", "situacao_consulta": "planejada", "status": "PREPARED",
+            "descricao": "Inspeção motor", "dados_adicionais": {"observacoes": ["datas ajustadas"]},
+        })
+        database.registrar_envio_bma("envio-2", "plano-1", {
+            "numero_ot": "RES124", "situacao_consulta": "ja_planejada", "status": "PREPARED",
+            "descricao": "Inspeção ventilador", "dados_adicionais": {},
+        })
+
+        self.assertEqual(len(database.listar_historico_ots(tipo="criadas")), 1)
+        self.assertEqual(database.listar_historico_ots(tipo="alteradas")[0]["wonum"], "RES123")
+        planned = database.listar_historico_ots(busca="res124", tipo="planejadas")
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]["acao"], "planejada")
+
     def test_upsert_preserves_all_fields_and_filters_by_status(self):
         records = [
             {
@@ -121,6 +141,22 @@ class OrdemTrabalhoDatabaseTests(unittest.TestCase):
 
         database.upsert_ordens_trabalho(records[:1], ["RES-TC-NF"])
         self.assertEqual(len(database.listar_alteracoes_ordens_trabalho(["RES-TC-NF"])), 1)
+
+    def test_preparation_labor_survives_oslc_refresh_without_relation_rows(self):
+        record = {
+            "siteid": "RES", "wonum": "PREP1", "status": "PREPARED",
+            "maintenanceshop": "RES-TC-NF", "worktype": "I", "wplabor": [],
+        }
+        database.upsert_ordens_trabalho([record], ["RES-TC-NF"])
+        lines = [{"craft": "180", "quantity": "2", "laborhrs": "1:00"}]
+
+        self.assertEqual(database.salvar_mao_de_obra_preparacao("RES", "PREP1", lines), 1)
+        database.upsert_ordens_trabalho([record], ["RES-TC-NF"])
+
+        saved = database.listar_ordens_trabalho(["RES-TC-NF"])[0]["dados"]
+        self.assertEqual(saved["wplabor"], lines)
+        self.assertEqual(saved["wplabor_origem"], "Preparação")
+        self.assertTrue(saved["wplabor_lido_em"])
 
     def test_rejects_orders_from_another_sector(self):
         record = {
@@ -277,6 +313,82 @@ class BMAOSLCTests(unittest.TestCase):
         for status in ("CAN", "CLOSE", "COMP", "HISTEDIT"):
             self.assertIn(f'status!="{status}"', where)
         self.assertNotIn("(", where)
+
+    def test_terminal_status_refresh_is_scoped_to_known_orders(self):
+        query = parse_qs(urlparse(BMAService._terminal_status_query_url(
+            ["RES-TC-NF"], ["RES1001"],
+        )).query)
+        where = query["oslc.where"][0]
+
+        self.assertIn('maintenanceshop in ["RES-TC-NF"]', where)
+        self.assertIn('wonum in ["RES1001"]', where)
+        self.assertIn('status in ["CAN","CLOSE","COMP","HISTEDIT"]', where)
+
+    def test_existing_order_status_is_refreshed_when_it_becomes_terminal(self):
+        service = BMAService()
+        existing = [{
+            "siteid": "RES", "wonum": "RES1001", "status": "PREPARED",
+            "maintenanceshop": "RES-TC-NF",
+        }]
+        terminal = {
+            "siteid": "RES", "wonum": "RES1001", "status": "COMP",
+            "maintenanceshop": "RES-TC-NF", "woclass": "WORKORDER",
+        }
+        unexpected_terminal = {**terminal, "wonum": "RES2000"}
+        with (
+            patch.object(service, "_create_browser") as browser,
+            patch.object(service, "_wait_for_work_tracking"),
+            patch.object(service, "_fetch_payload", side_effect=[
+                {"member": []}, {"member": [terminal, unexpected_terminal]},
+            ]) as fetch,
+        ):
+            records = service.listar_ots_por_setor(["RES-TC-NF"], existing_orders=existing)
+
+        self.assertEqual([(record["wonum"], record["status"]) for record in records], [("RES1001", "COMP")])
+        refresh_where = parse_qs(urlparse(fetch.call_args_list[1].args[1]).query)["oslc.where"][0]
+        self.assertIn('wonum in ["RES1001"]', refresh_where)
+        browser.return_value.quit.assert_called_once()
+
+    def test_scheduled_query_uses_maximo_supported_scope_filters(self):
+        service = BMAService()
+        url = service._scheduled_query_url(["RES-TC-NF"], "2026-11-01", "2026-11-30")
+        where = parse_qs(urlparse(url).query)["oslc.where"][0]
+
+        self.assertIn('maintenanceshop in ["RES-TC-NF"]', where)
+        self.assertIn("istask=0", where)
+        self.assertIn('woclass in ["WORKORDER","ACTIVITY"]', where)
+        self.assertIn("historyflag=0", where)
+        self.assertIn('siteid="RES"', where)
+        self.assertNotRegex(where, r"sched(?:start|finish)\s*(?:>=|<=|>|<)")
+
+    def test_scheduled_collection_filters_by_planned_start_only(self):
+        service = BMAService()
+        valid = {
+            "wonum": "RES1", "siteid": "RES", "status": "APPR", "maintenanceshop": "RES-TC-NF",
+            "istask": 0, "woclass": "WORKORDER", "historyflag": 0,
+            "schedstart": "2026-11-01T01:00:00", "schedfinish": "2026-12-30T00:00:00",
+        }
+        records = [
+            valid,
+            {**valid, "wonum": "RES0", "schedstart": "2026-11-01T00:00:00"},
+            {**valid, "wonum": "RES6", "schedstart": "2026-11-30T23:59:59"},
+            {**valid, "wonum": "RES2", "istask": 1},
+            {**valid, "wonum": "RES3", "schedstart": "2026-10-31T23:59:00"},
+            {**valid, "wonum": "RES7", "schedstart": "2026-12-01T00:00:00"},
+            {**valid, "wonum": "RES4", "maintenanceshop": "RES-OUTRO"},
+            {key: value for key, value in valid.items() if key != "schedfinish"} | {"wonum": "RES5"},
+        ]
+        driver = unittest.mock.Mock()
+        with patch.object(service, "_fetch_payload", return_value={"member": records}) as fetch:
+            result = service.coletar_ots_programadas(
+                ["RES-TC-NF"], "2026-11-01", "2026-11-30", driver=driver,
+            )
+
+        self.assertEqual([item["wonum"] for item in result], ["RES1", "RES0", "RES6", "RES5"])
+        where = parse_qs(urlparse(fetch.call_args.args[1]).query)["oslc.where"][0]
+        self.assertIn('maintenanceshop in ["RES-TC-NF"]', where)
+        self.assertNotIn("schedstart", where)
+        driver.quit.assert_not_called()
 
     def test_opens_work_tracking_and_fetches_all_pages_within_the_authenticated_browser(self):
         driver = unittest.mock.Mock()
